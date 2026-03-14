@@ -4,8 +4,9 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "npx vite build",
     "dev": "concurrently \"vite\" \"node server/index.js\"",
+    "start": "node server/index.js",
     "start:server": "node server/index.js"
   },
   "dependencies": {

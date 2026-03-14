@@ -844,7 +844,25 @@ app.delete('/api/admin/questions/:id', authenticateAdmin, async (req, res) => {
 });
 
 
+// Serve the built React frontend
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, '../dist');
+
+// Serve static assets from the React build directory
+app.use(express.static(distPath));
+
+// For all other routes, serve index.html (supports React Router)
+app.get('*', (req, res) => {
+    // If it's an API call that wasn't handled, send 404
+    if (req.originalUrl.startsWith('/api')) {
+        return res.status(404).json({ error: 'API route not found' });
+    }
+    // For all other requests, send index.html
+    res.sendFile(path.join(distPath, 'index.html'));
+});
+
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
 });
