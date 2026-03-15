@@ -4,8 +4,18 @@ import { Header } from '../components/Header';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { useAppContext } from '../context/AppContext';
-import { MessageCircle, Send, Shield, Loader2, Trash2, Menu, X } from 'lucide-react';
+import { MessageCircle, Send, Shield, Loader2, Trash2, Menu, X, UserCheck } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+
+interface LawyerSuggestion {
+  name: string;
+  specialization: string;
+  city: string;
+  experience: string;
+  reason: string;
+  phone?: string;
+  email?: string;
+}
 
 export function AIChat() {
   const navigate = useNavigate();
@@ -20,6 +30,7 @@ export function AIChat() {
   const [isTyping, setIsTyping] = useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isRecommending, setIsRecommending] = useState(false);
 
   // Redirect to signup if not authenticated
   useEffect(() => {
@@ -106,6 +117,102 @@ export function AIChat() {
       });
       setIsGeneratingSummary(false);
     }, 800); // 800ms delay to still show the nice transition loading state
+  };
+
+  const handleRecommendLawyer = async () => {
+    setIsRecommending(true);
+    setIsSidebarOpen(false);
+
+    // Add a 'thinking' message from the assistant
+    addMessage({
+      id: Date.now().toString(),
+      role: 'assistant',
+      content: '🔍 Analyzing your case… I am reviewing your profile and our conversation to find the best-matched verified lawyers for you. This will just take a moment.',
+    });
+
+    try {
+      const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+      if (!apiKey) throw new Error('Gemini API key missing');
+
+      // Fetch verified lawyers
+      const lawyersRes = await fetch('/api/lawyers');
+      const lawyers = lawyersRes.ok ? await lawyersRes.json() : [];
+
+      if (!lawyers || lawyers.length === 0) {
+        addMessage({
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: "I'm sorry, I couldn't find any verified lawyers available at the moment. Please try again soon or browse the Verified Lawyers page.",
+        });
+        setIsRecommending(false);
+        return;
+      }
+
+      // Build a summarized chat context (last 10 messages in active session)
+      const chatContext = currentChat
+        .slice(-10)
+        .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
+        .join('\n');
+
+      // Build matching prompt
+      const matchPrompt = `You are a legal case matching assistant for RAAH, a platform helping women in Pakistan.
+
+You must select the TOP 3 most suitable verified lawyers from the list below for this user.
+
+USER PROFILE (from initial interview):
+${userProfile ? JSON.stringify(userProfile, null, 2) : 'Not available'}
+
+RECENT CHAT CONTEXT:
+${chatContext || 'No chat history yet.'}
+
+AVAILABLE VERIFIED LAWYERS (JSON array):
+${JSON.stringify(lawyers.slice(0, 20), null, 2)}
+
+INSTRUCTIONS:
+- Carefully consider the user's legal concern, urgency, location (province/city), and case details.
+- Prioritize lawyers whose practice areas align with the user's legal concern.
+- Briefly explain WHY each lawyer is a good fit (1-2 sentences).
+- Respond ONLY with a valid JSON array of top 3 recommended lawyers in this exact format:
+[
+  {
+    "name": "Full Name",
+    "specialization": "Specialization",
+    "city": "City",
+    "experience": "X years",
+    "reason": "Why this lawyer is a good match.",
+    "phone": "phone or null",
+    "email": "email or null"
+  }
+]
+Return ONLY the JSON array, no extra text.`;
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+      const result = await model.generateContent(matchPrompt);
+      const raw = result.response.text().trim();
+
+      // Clean possible markdown fences
+      const cleaned = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+      const recommendations: LawyerSuggestion[] = JSON.parse(cleaned);
+
+      // Inject recommendation into chat as a special assistant message
+      const recContent = `__LAWYER_RECS__:${JSON.stringify(recommendations)}`;
+      addMessage({
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: recContent,
+      });
+
+    } catch (err) {
+      console.error('Lawyer recommendation failed:', err);
+      addMessage({
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: "I had trouble generating lawyer recommendations right now. Please try again in a moment.",
+      });
+    } finally {
+      setIsRecommending(false);
+    }
   };
 
   const handleSendMessage = async () => {
@@ -258,11 +365,23 @@ Use this profile to tailor every response. Never ask the user to repeat anything
                 createNewSession();
                 setIsSidebarOpen(false);
               }}
-              className="bg-primary text-white hover:bg-primary/90 w-full mb-6 rounded-[10px]"
+              className="bg-primary text-white hover:bg-primary/90 w-full mb-3 rounded-[10px]"
             >
               <MessageCircle className="w-4 h-4 mr-2" />
               New Chat
             </Button>
+
+            <button
+              onClick={handleRecommendLawyer}
+              disabled={isRecommending}
+              className="w-full mb-6 flex items-center justify-center gap-2 border border-secondary text-secondary hover:bg-secondary/10 transition-colors rounded-[10px] py-2 text-[14px] font-medium disabled:opacity-50"
+            >
+              {isRecommending ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> Finding Lawyers...</>
+              ) : (
+                <><UserCheck className="w-4 h-4" /> Recommend Me a Lawyer</>
+              )}
+            </button>
 
             <div className="flex-1 overflow-y-auto pr-2">
               <h3 className="text-[13px] font-semibold text-muted-foreground mb-3 uppercase tracking-wide">
@@ -359,21 +478,64 @@ Use this profile to tailor every response. Never ask the user to repeat anything
                     Send a message to start the legal consultation.
                  </div>
               ) : (
-                currentChat.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
+                currentChat.map((message) => {
+                  // Special rendering for lawyer recommendation messages
+                  if (message.role === 'assistant' && message.content.startsWith('__LAWYER_RECS__:')) {
+                    const raw = message.content.replace('__LAWYER_RECS__:', '');
+                    let recs: LawyerSuggestion[] = [];
+                    try { recs = JSON.parse(raw); } catch {}
+                    return (
+                      <div key={message.id} className="flex justify-start w-full">
+                        <div className="w-full max-w-[90%] space-y-3">
+                          <p className="text-[14px] font-semibold text-foreground flex items-center gap-2">
+                            <UserCheck className="w-4 h-4 text-secondary" />
+                            Based on your case, here are the best-matched verified lawyers for you:
+                          </p>
+                          {recs.map((lawyer, i) => (
+                            <div key={i} className="bg-white border border-border rounded-[12px] p-4 shadow-sm">
+                              <div className="flex items-start justify-between gap-3 flex-wrap">
+                                <div className="flex-1">
+                                  <h4 className="text-[15px] font-semibold text-foreground">{lawyer.name}</h4>
+                                  <p className="text-[13px] text-secondary font-medium">{lawyer.specialization}</p>
+                                  <p className="text-[12px] text-muted-foreground">{lawyer.city} · {lawyer.experience}</p>
+                                  <p className="text-[13px] text-slate-600 mt-2 italic">"{lawyer.reason}"</p>
+                                </div>
+                                <div className="flex flex-col gap-2 shrink-0">
+                                  {lawyer.phone && (
+                                    <a href={`tel:${lawyer.phone}`} className="text-[12px] bg-primary text-white px-3 py-1.5 rounded-full hover:bg-primary/90 transition-colors text-center">
+                                      Call
+                                    </a>
+                                  )}
+                                  {lawyer.email && (
+                                    <a href={`mailto:${lawyer.email}`} className="text-[12px] border border-primary text-primary px-3 py-1.5 rounded-full hover:bg-primary/5 transition-colors text-center">
+                                      Email
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  return (
                     <div
-                      className={`rounded-[10px] px-4 py-3 max-w-[70%] ${message.role === 'user'
-                        ? 'bg-[#F1F5F9] text-foreground'
-                        : 'bg-accent text-foreground'
-                        }`}
+                      key={message.id}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
                     >
-                      <p className="text-[15px]">{message.content}</p>
+                      <div
+                        className={`rounded-[10px] px-4 py-3 max-w-[70%] ${message.role === 'user'
+                          ? 'bg-[#F1F5F9] text-foreground'
+                          : 'bg-accent text-foreground'
+                          }`}
+                      >
+                        <p className="text-[15px]">{message.content}</p>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
               {isTyping && (
                 <div className="flex justify-start">
