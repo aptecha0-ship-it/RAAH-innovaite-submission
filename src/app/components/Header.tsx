@@ -147,13 +147,13 @@ export function Header() {
             {isAuthenticated ? (
               <>
                 {userRole === 'admin' ? (
-                  <Link to="/admin">
+                  <Link to="/admin" className="hidden md:block">
                     <Button className="bg-purple-600 text-white hover:bg-purple-700">
                       Admin Panel
                     </Button>
                   </Link>
                 ) : (
-                  <Link to={userRole === 'lawyer' ? '/lawyer-dashboard' : '/chat'}>
+                  <Link to={userRole === 'lawyer' ? '/lawyer-dashboard' : '/chat'} className="hidden md:block">
                     <Button className="bg-primary text-white hover:bg-primary/90">
                       My Dashboard
                     </Button>
@@ -189,7 +189,7 @@ export function Header() {
                     Login
                   </Button>
                 </Link>
-                <Link to="/signup">
+                <Link to="/signup" className="hidden md:block">
                   <Button className="bg-primary text-white hover:bg-primary/90">
                     Start Legal Check
                   </Button>
@@ -215,6 +215,29 @@ export function Header() {
           <Link to="/about" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2">
             About
           </Link>
+          <div className="pt-2 flex flex-col gap-3 border-t border-border/50">
+            {isAuthenticated ? (
+                userRole === 'admin' ? (
+                  <Link to="/admin" onClick={() => setShowMobileMenu(false)} className="w-full">
+                    <Button className="bg-purple-600 text-white hover:bg-purple-700 w-full">
+                      Admin Panel
+                    </Button>
+                  </Link>
+                ) : (
+                  <Link to={userRole === 'lawyer' ? '/lawyer-dashboard' : '/chat'} onClick={() => setShowMobileMenu(false)} className="w-full">
+                    <Button className="bg-primary text-white hover:bg-primary/90 w-full">
+                      My Dashboard
+                    </Button>
+                  </Link>
+                )
+            ) : (
+              <Link to="/signup" onClick={() => setShowMobileMenu(false)} className="w-full">
+                <Button className="bg-primary text-white hover:bg-primary/90 w-full">
+                  Start Legal Check
+                </Button>
+              </Link>
+            )}
+          </div>
         </div>
       )}
     </header>
