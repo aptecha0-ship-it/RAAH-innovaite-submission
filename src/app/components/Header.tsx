@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router';
 import { Button } from './ui/button';
 import { useAppContext } from '../context/AppContext';
-import { LogOut, User } from 'lucide-react';
+import { LogOut, User, Menu, X } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
 export function Header() {
@@ -14,7 +14,9 @@ export function Header() {
   } = useAppContext();
   const isLawyerDashboard = location.pathname === '/lawyer-dashboard';
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
 
   const getInitials = () => {
     if (lawyerProfile?.full_name) {
@@ -45,16 +47,19 @@ export function Header() {
       if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
         setShowUserMenu(false);
       }
+      if (mobileMenuRef.current && !mobileMenuRef.current.contains(event.target as Node)) {
+        setShowMobileMenu(false);
+      }
     };
 
-    if (showUserMenu) {
+    if (showUserMenu || showMobileMenu) {
       document.addEventListener('mousedown', handleClickOutside);
     }
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [showUserMenu]);
+  }, [showUserMenu, showMobileMenu]);
 
   const handleLogout = () => {
     localStorage.removeItem('auth_token');
@@ -118,6 +123,12 @@ export function Header() {
           </Link>
         </div>
         <div className="flex items-center gap-4 lg:gap-6">
+          <button
+            className="md:hidden text-foreground p-1"
+            onClick={() => setShowMobileMenu(!showMobileMenu)}
+          >
+            {showMobileMenu ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
+          </button>
           <nav className="hidden md:flex items-center gap-6">
             <Link to="/" className="text-[15px] text-foreground hover:text-primary transition-colors">
               Home
@@ -188,6 +199,24 @@ export function Header() {
           </div>
         </div>
       </div>
+
+      {/* Mobile Navigation Menu */}
+      {showMobileMenu && (
+        <div ref={mobileMenuRef} className="md:hidden absolute top-20 left-0 w-full bg-white border-b border-border shadow-lg z-40 py-4 px-6 flex flex-col gap-4">
+          <Link to="/" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2 border-b border-border/50">
+            Home
+          </Link>
+          <Link to="/how-it-works" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2 border-b border-border/50">
+            How It Works
+          </Link>
+          <Link to="/lawyers" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2 border-b border-border/50">
+            Verified Lawyers
+          </Link>
+          <Link to="/about" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2">
+            About
+          </Link>
+        </div>
+      )}
     </header>
   );
 }
