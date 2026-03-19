@@ -6,8 +6,16 @@ import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Pinecone } from '@pinecone-database/pinecone';
 
 dotenv.config();
+
+// ----------------------------------------------------------------------
+// DEBUG: Catch 'alert' calls
+global.alert = (msg) => {
+    console.error('SERVER-SIDE ALERT CALLED:', msg);
+    console.trace();
+};
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -25,6 +33,145 @@ const pool = new Pool({
         rejectUnauthorized: false
     }
 });
+
+// ----------------------------------------------------------------------
+// PINECONE CLIENT + EMBEDDING HELPERS
+// ----------------------------------------------------------------------
+
+const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY || '' });
+const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX || 'raah-aap';
+
+// Ensure the Pinecone index exists (dim=768 for gemini-embedding-001 default, metric=cosine)
+const ensurePineconeIndex = async () => {
+    try {
+        const { indexes } = await pinecone.listIndexes();
+        const exists = indexes && indexes.some(i => i.name === PINECONE_INDEX_NAME);
+        if (!exists) {
+            console.log(`Creating Pinecone index '${PINECONE_INDEX_NAME}'...`);
+            await pinecone.createIndex({
+                name: PINECONE_INDEX_NAME,
+                dimension: 768,
+                metric: 'cosine',
+                spec: { serverless: { cloud: 'aws', region: 'us-east-1' } }
+            });
+            // Wait for index to be ready
+            await new Promise(r => setTimeout(r, 10000));
+            console.log('Pinecone index created.');
+        }
+    } catch (err) {
+        console.error('Pinecone index check/create failed:', err.message);
+    }
+};
+
+// Diagnostic endpoint to check Pinecone status
+app.get('/api/debug/pinecone', async (req, res) => {
+    try {
+        console.log('[Debug] Checking Pinecone status...');
+        const { indexes } = await pinecone.listIndexes();
+        const indexList = indexes.map(i => i.name);
+        const exists = indexList.includes(PINECONE_INDEX_NAME);
+        
+        let indexStats = null;
+        if (exists) {
+            const index = pinecone.index(PINECONE_INDEX_NAME);
+            indexStats = await index.describeIndexStats();
+        }
+
+        res.json({
+            indexName: PINECONE_INDEX_NAME,
+            indexExists: exists,
+            allIndexes: indexList,
+            stats: indexStats,
+            env: {
+                hasApiKey: !!process.env.PINECONE_API_KEY,
+                region: 'us-east-1' // from the hardcoded spec
+            }
+        });
+    } catch (error) {
+        console.error('[Debug] Pinecone diagnostic failed:', error);
+        res.status(500).json({ error: error.message, stack: error.stack });
+    }
+});
+
+// Embed text using Gemini gemini-embedding-001 (768 dims default, reads key from ai_settings)
+const embedText = async (text) => {
+    const settingsResult = await pool.query('SELECT gemini_api_key FROM ai_settings LIMIT 1');
+    const row = settingsResult.rows[0];
+    const apiKey = row?.gemini_api_key || process.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) throw new Error('No Gemini API key configured for embeddings.');
+
+    const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=${apiKey}`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'models/gemini-embedding-001', content: { parts: [{ text }] }, outputDimensionality: 768 })
+        }
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(`Embedding API error: ${err?.error?.message || res.status}`);
+    }
+    const data = await res.json();
+    const values = data?.embedding?.values;
+    if (!values || values.length === 0) {
+        console.error('[embedText] Unexpected Gemini response structure:', JSON.stringify(data).slice(0, 500));
+        throw new Error('Gemini embedding returned empty or missing values');
+    }
+    console.log(`[embedText] Generated ${values.length}-dim vector for text: "${text.slice(0, 50)}..."`);
+    return values;
+};
+
+// Build a text string from a lawyer DB row for embedding
+const lawyerToText = (row) => {
+    let areas = row.practice_areas || '';
+    try { areas = JSON.parse(areas).join(', '); } catch { }
+    return [
+        `Name: ${row.full_name || ''}`,
+        `Practice Areas: ${areas}`,
+        `City: ${row.city || ''}`,
+        `Experience: ${row.years_of_experience || ''} years`,
+        `Bar Council: ${row.bar_council_name || ''}`,
+    ].join('. ');
+};
+
+const upsertLawyerToPinecone = async (lawyerRow) => {
+    console.log(`[Pinecone Sync] Processing lawyer ${lawyerRow.id} (${lawyerRow.full_name})...`);
+    try {
+        const text = lawyerToText(lawyerRow);
+        console.log(`[Pinecone Sync] Embedding text: "${text.slice(0, 100)}..."`);
+        const vector = await embedText(text);
+        
+        if (!vector || vector.length === 0) {
+            console.warn(`[Pinecone Sync] Lawyer ${lawyerRow.id}: Empty vector generated, skipping.`);
+            return;
+        }
+
+        const index = pinecone.index(PINECONE_INDEX_NAME);
+        const record = {
+            id: `lawyer_${lawyerRow.id}`,
+            values: vector,
+            metadata: { 
+                lawyer_id: lawyerRow.id, 
+                city: lawyerRow.city || '', 
+                full_name: lawyerRow.full_name || '' 
+            }
+        };
+
+        // Explicitly ensuring an array of records is sent within the options object
+        const recordsToUpsert = [record];
+        console.log(`[Pinecone Sync] Attempting upsert for lawyer ${lawyerRow.id}. Records count: ${recordsToUpsert.length}`);
+        
+        // Pinecone v3/v4 SDK expects { records: [...] } instead of directly passing the array
+        const upsertResponse = await index.upsert({ records: recordsToUpsert });
+        console.log(`[Pinecone Sync] Lawyer ${lawyerRow.id} synced successfully! Response:`, JSON.stringify(upsertResponse));
+    } catch (err) {
+        console.error(`[Pinecone Sync] FATAL ERROR syncing lawyer ${lawyerRow.id}:`, err);
+        if (err.stack) console.error(err.stack);
+    }
+};
+
+ensurePineconeIndex();
 
 // Initialize database table
 const initDb = async () => {
@@ -233,6 +380,80 @@ const initDb = async () => {
             }
             console.log('Default interview questions inserted.');
         }
+
+        // Create ai_settings table
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS ai_settings (
+            id SERIAL PRIMARY KEY,
+            active_model VARCHAR(50) DEFAULT 'gemini',
+            gemini_api_key TEXT,
+            grok_api_key TEXT,
+            system_prompt TEXT,
+            gemini_status VARCHAR(50) DEFAULT 'operational',
+            grok_status VARCHAR(50) DEFAULT 'operational',
+            last_error TEXT,
+            last_error_at TIMESTAMP WITH TIME ZONE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Check if system_prompt column exists and add it if not (for existing databases)
+        const checkSystemPromptColumn = await client.query(`
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_name='ai_settings' AND column_name='system_prompt';
+        `);
+        if (checkSystemPromptColumn.rows.length === 0) {
+            await client.query(`ALTER TABLE ai_settings ADD COLUMN system_prompt TEXT;`);
+            console.log('Added system_prompt column to ai_settings table');
+        }
+
+        // Add status columns for fallback mechanism (for existing databases)
+        const checkGeminiStatusColumn = await client.query(`
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_name='ai_settings' AND column_name='gemini_status';
+        `);
+        if (checkGeminiStatusColumn.rows.length === 0) {
+            await client.query(`
+                ALTER TABLE ai_settings
+                ADD COLUMN gemini_status VARCHAR(50) DEFAULT 'operational',
+                ADD COLUMN grok_status VARCHAR(50) DEFAULT 'operational',
+                ADD COLUMN last_error TEXT,
+                ADD COLUMN last_error_at TIMESTAMP WITH TIME ZONE;
+            `);
+            console.log('Added AI status tracking columns to ai_settings table');
+        }
+
+        // Seed one default row if none exists
+        const aiSettingsCheck = await client.query('SELECT id FROM ai_settings LIMIT 1');
+        if (aiSettingsCheck.rows.length === 0) {
+            await client.query(`INSERT INTO ai_settings (active_model) VALUES ('gemini')`);
+            console.log('Default ai_settings row created.');
+        }
+
+        // Create consultations table
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS consultations (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            lawyer_profile_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE,
+            user_summary TEXT,
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Create consultation_messages table for real-time chat
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS consultation_messages (
+            id SERIAL PRIMARY KEY,
+            consultation_id INTEGER REFERENCES consultations(id) ON DELETE CASCADE,
+            sender_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            message TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
 
         console.log('Users table initialized or already exists');
         client.release();
@@ -619,16 +840,16 @@ app.get('/api/lawyers', async (req, res) => {
             WHERE lp.status = 'approved'
             ORDER BY lp.created_at DESC
         `);
-        
+
         const lawyers = result.rows.map(row => {
             let spec = '';
             try {
                 const parsed = JSON.parse(row.practice_areas || '[]');
                 spec = Array.isArray(parsed) ? parsed.join(' / ') : row.practice_areas;
-            } catch(e) {
+            } catch (e) {
                 spec = row.practice_areas;
             }
-            
+
             return {
                 id: row.id.toString(),
                 name: row.full_name,
@@ -642,7 +863,7 @@ app.get('/api/lawyers', async (req, res) => {
                 chamberAddress: row.chamber_address || null,
             };
         });
-        
+
         res.json(lawyers);
     } catch (error) {
         console.error('Error fetching public lawyers:', error);
@@ -726,9 +947,11 @@ app.put('/api/admin/lawyers/:id/status', authenticateAdmin, async (req, res) => 
             return res.status(404).json({ error: 'Lawyer profile not found' });
         }
 
-        // Specifically set user role if approved? It's already 'lawyer' during signup but good sanity check.
+        // Set user role on approval
         if (status === 'approved') {
             await pool.query("UPDATE users SET role = 'lawyer' WHERE id = $1", [result.rows[0].user_id]);
+            // Auto-embed into Pinecone asynchronously (don't block the response)
+            upsertLawyerToPinecone(result.rows[0]);
         }
 
         res.json({ message: `Lawyer status updated to ${status}`, profile: result.rows[0] });
@@ -738,6 +961,479 @@ app.put('/api/admin/lawyers/:id/status', authenticateAdmin, async (req, res) => 
     }
 });
 
+
+// ----------------------------------------------------------------------
+// AI SETTINGS (ADMIN + USER)
+// ----------------------------------------------------------------------
+
+// GET /api/ai-config (public — returns active model name and key presence only, no key values)
+app.get('/api/ai-config', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT active_model, gemini_api_key, grok_api_key FROM ai_settings ORDER BY id LIMIT 1');
+        const row = result.rows[0] || {};
+        res.json({
+            active_model: row.active_model || 'gemini',
+            has_gemini_key: !!(row.gemini_api_key && row.gemini_api_key.trim()),
+            has_grok_key: !!(row.grok_api_key && row.grok_api_key.trim()),
+        });
+    } catch (error) {
+        console.error('Error fetching ai-config:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/chat-key (user auth — returns active key for chat usage)
+app.get('/api/chat-key', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+    const token = authHeader.split(' ')[1];
+    try {
+        jwt.verify(token, JWT_SECRET); // just validate, no need for userId
+        const result = await pool.query('SELECT active_model, gemini_api_key, grok_api_key, system_prompt FROM ai_settings ORDER BY id LIMIT 1');
+        const row = result.rows[0] || {};
+        res.json({
+            active_model: row.active_model || 'gemini',
+            gemini_api_key: row.gemini_api_key || '',
+            grok_api_key: row.grok_api_key || '',
+            system_prompt: row.system_prompt || ''
+        });
+    } catch (error) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+});
+
+// GET /api/admin/ai-settings (admin — full keys for the settings form)
+app.get('/api/admin/ai-settings', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM ai_settings ORDER BY id LIMIT 1');
+        const row = result.rows[0] || {
+            active_model: 'gemini', gemini_api_key: '', grok_api_key: '', system_prompt: '',
+            gemini_status: 'operational', grok_status: 'operational', last_error: null, last_error_at: null
+        };
+        res.json(row);
+    } catch (error) {
+        console.error('Error fetching admin ai-settings:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PUT /api/admin/ai-settings (admin — save model + keys)
+app.put('/api/admin/ai-settings', authenticateAdmin, async (req, res) => {
+    const { active_model, gemini_api_key, grok_api_key, system_prompt } = req.body;
+    if (!active_model || !['gemini', 'grok'].includes(active_model)) {
+        return res.status(400).json({ error: 'Invalid active_model. Must be gemini or grok.' });
+    }
+    try {
+        // Check if a row exists and upsert accordingly
+        const existing = await pool.query('SELECT id FROM ai_settings LIMIT 1');
+        if (existing.rows.length > 0) {
+            await pool.query(
+                `UPDATE ai_settings SET
+                    active_model = $1, gemini_api_key = $2, grok_api_key = $3, system_prompt = $4,
+                    gemini_status = 'operational', grok_status = 'operational', last_error = NULL, last_error_at = NULL,
+                    updated_at = NOW()
+                 WHERE id = $5`,
+                [active_model, gemini_api_key || null, grok_api_key || null, system_prompt || null, existing.rows[0].id]
+            );
+        } else {
+            await pool.query(
+                `INSERT INTO ai_settings (active_model, gemini_api_key, grok_api_key, system_prompt) VALUES ($1, $2, $3, $4)`,
+                [active_model, gemini_api_key || null, grok_api_key || null, system_prompt || null]
+            );
+        }
+        res.json({ message: 'AI settings saved successfully, health status reset to operational.' });
+    } catch (error) {
+        console.error('Error saving ai-settings:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// POST /api/ai-settings/report-error (user auth — quietly records API failure)
+app.post('/api/ai-settings/report-error', async (req, res) => {
+    // We intentionally don't strictly require a Bearer token here so it can silently fail and log,
+    // but typically it accepts the user token anyway.
+    const { provider, error_message } = req.body;
+    
+    if (!provider || !['gemini', 'grok'].includes(provider)) {
+        return res.status(400).json({ error: 'Invalid provider' });
+    }
+
+    try {
+        const errorText = error_message ? String(error_message).substring(0, 500) : 'Unknown API failure';
+        
+        if (provider === 'gemini') {
+            await pool.query(`UPDATE ai_settings SET gemini_status = 'failing', last_error = $1, last_error_at = NOW()`, [errorText]);
+        } else {
+            await pool.query(`UPDATE ai_settings SET grok_status = 'failing', last_error = $1, last_error_at = NOW()`, [errorText]);
+        }
+        
+        res.json({ success: true, message: 'Error logged' });
+    } catch (err) {
+        // We don't want this to crash the chat, so just silently fail.
+        console.error('Failed to report AI error:', err);
+        res.status(500).json({ error: 'Failed to record error' });
+    }
+});
+
+// POST /api/admin/sync-pinecone (admin — bulk embed all approved lawyers)
+app.post('/api/admin/sync-pinecone', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query("SELECT * FROM lawyer_profiles WHERE status = 'approved'");
+        const lawyers = result.rows;
+        
+        if (lawyers.length === 0) {
+            return res.json({ message: 'No approved lawyers found to sync.', synced: 0 });
+        }
+
+        // Respond immediately as this might take a while
+        res.json({ 
+            message: `Starting background sync of ${lawyers.length} lawyer(s) to Pinecone.`, 
+            synced: lawyers.length 
+        });
+
+        // Run sync in the background
+        (async () => {
+            console.log(`[Pinecone Sync] starting bulk sync of ${lawyers.length} lawyers...`);
+            for (const lawyer of lawyers) {
+                await upsertLawyerToPinecone(lawyer);
+                // 300ms delay to avoid aggressive rate limiting
+                await new Promise(r => setTimeout(r, 300));
+            }
+            console.log('[Pinecone Sync] Bulk sync complete.');
+        })().catch(err => {
+            console.error('[Pinecone Sync] Fatal error during bulk sync:', err);
+        });
+
+    } catch (error) {
+        console.error('[Pinecone Sync] API error:', error);
+        res.status(500).json({ error: 'Internal server error during sync' });
+    }
+});
+
+
+// ----------------------------------------------------------------------
+// RECOMMENDATIONS (USER AUTH)
+// ----------------------------------------------------------------------
+
+// POST /api/recommendations — embed user profile + chat → query Pinecone → return enriched lawyer profiles
+app.post('/api/recommendations', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    try {
+        jwt.verify(token, JWT_SECRET);
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const { userProfile, chatMessages } = req.body;
+
+    try {
+        // Build a context text to embed
+        const profileText = userProfile ? [
+            `Legal Concern: ${userProfile.legalConcern || ''}`,
+            `Province: ${userProfile.province || ''}`,
+            `Emergency: ${userProfile.emergencyStatus || ''}`,
+            `Preferred Outcome: ${userProfile.preferredOutcome || ''}`,
+            `Issue: ${userProfile.incidentDescription || ''}`,
+        ].join('. ') : '';
+
+        const chatText = Array.isArray(chatMessages)
+            ? chatMessages.slice(-8).map(m => `${m.role === 'user' ? 'User' : 'AI'}: ${m.content}`).join('\n')
+            : '';
+
+        const queryText = [profileText, chatText].filter(Boolean).join('\n\n').slice(0, 2500);
+
+        // Generate embedding for user context
+        console.log('[Recommendations] Generating embedding for query text...');
+        const queryVector = await embedText(queryText || 'Legal assistance in Pakistan');
+
+        // Query Pinecone for top 3 similar lawyers
+        console.log(`[Recommendations] Querying Pinecone index '${PINECONE_INDEX_NAME}'...`);
+        const index = pinecone.index(PINECONE_INDEX_NAME);
+        const queryResult = await index.query({ vector: queryVector, topK: 3, includeMetadata: true });
+
+        console.log(`[Recommendations] Pinecone returned ${queryResult.matches?.length || 0} matches.`);
+        const matches = queryResult.matches || [];
+        if (matches.length === 0) {
+            console.log('[Recommendations] No matches found in Pinecone.');
+            return res.json({ recommendations: [] });
+        }
+
+        // Extract lawyer IDs from Pinecone metadata
+        const lawyerIds = matches.map(m => {
+            console.log(`[Recommendations] Match: ID=${m.id}, Score=${m.score}, Metadata=`, JSON.stringify(m.metadata));
+            return m.metadata?.lawyer_id;
+        }).filter(Boolean);
+
+        // Fetch full profiles from PostgreSQL
+        const profilesResult = await pool.query(
+            `SELECT u.email, lp.* FROM lawyer_profiles lp JOIN users u ON lp.user_id = u.id WHERE lp.id = ANY($1)`,
+            [lawyerIds]
+        );
+
+        // Merge score from Pinecone with full profile
+        const enriched = matches.map(match => {
+            const lid = match.metadata?.lawyer_id;
+            const profile = profilesResult.rows.find(r => r.id === lid);
+            if (!profile) return null;
+            let areas = profile.practice_areas || '';
+            try { areas = JSON.parse(areas).join(' / '); } catch { }
+            return {
+                id: profile.id,
+                full_name: profile.full_name,
+                city: profile.city,
+                specialization: areas || 'General Practice',
+                years_of_experience: profile.years_of_experience,
+                bar_council_name: profile.bar_council_name,
+                chamber_address: profile.chamber_address,
+                phone: profile.phone,
+                email: profile.email,
+                score: match.score || 0,              // cosine similarity 0-1
+                matchPercent: Math.round((match.score || 0) * 100),
+            };
+        }).filter(Boolean);
+
+        res.json({ recommendations: enriched });
+    } catch (error) {
+        console.error('Recommendation error:', error);
+        res.status(500).json({ error: 'Recommendation failed: ' + error.message });
+    }
+});
+
+
+// ----------------------------------------------------------------------
+// CONSULTATIONS
+// ----------------------------------------------------------------------
+
+// POST /api/consultations — user sends a consultation request to a lawyer
+app.post('/api/consultations', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const { lawyerProfileId, userSummary } = req.body;
+    if (!lawyerProfileId) return res.status(400).json({ error: 'lawyerProfileId is required' });
+
+    try {
+        // Prevent duplicate requests to same lawyer
+        const existing = await pool.query(
+            `SELECT id FROM consultations WHERE user_id = $1 AND lawyer_profile_id = $2 AND status = 'pending'`,
+            [userId, lawyerProfileId]
+        );
+        if (existing.rows.length > 0) {
+            return res.status(409).json({ error: 'You already have a pending request with this lawyer.' });
+        }
+
+        const result = await pool.query(
+            `INSERT INTO consultations (user_id, lawyer_profile_id, user_summary) VALUES ($1, $2, $3) RETURNING *`,
+            [userId, lawyerProfileId, userSummary || null]
+        );
+        res.status(201).json({ message: 'Consultation request sent.', consultation: result.rows[0] });
+    } catch (error) {
+        console.error('Consultation error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/user/consultations — user views their own requests
+app.get('/api/user/consultations', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    try {
+        const result = await pool.query(`
+            SELECT c.*, lp.full_name as lawyer_name, lp.practice_areas as lawyer_specialty
+            FROM consultations c
+            JOIN lawyer_profiles lp ON c.lawyer_profile_id = lp.id
+            WHERE c.user_id = $1
+            ORDER BY c.created_at DESC
+        `, [userId]);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Fetch user consultations error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/lawyer/consultations — lawyer views their incoming requests
+app.get('/api/lawyer/consultations', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    try {
+        // Get the lawyer_profile id for this user
+        const lawyerResult = await pool.query('SELECT id FROM lawyer_profiles WHERE user_id = $1', [userId]);
+        if (lawyerResult.rows.length === 0) return res.status(403).json({ error: 'No lawyer profile found.' });
+        const lawyerProfileId = lawyerResult.rows[0].id;
+
+        const result = await pool.query(`
+            SELECT c.*, u.email as user_email
+            FROM consultations c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.lawyer_profile_id = $1
+            ORDER BY c.created_at DESC
+        `, [lawyerProfileId]);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Fetch consultations error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PUT /api/lawyer/consultations/:id — lawyer accepts or declines a request
+app.put('/api/lawyer/consultations/:id', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!['accepted', 'declined'].includes(status)) return res.status(400).json({ error: 'Status must be accepted or declined' });
+
+    try {
+        const lawyerResult = await pool.query('SELECT id FROM lawyer_profiles WHERE user_id = $1', [userId]);
+        if (lawyerResult.rows.length === 0) return res.status(403).json({ error: 'No lawyer profile found.' });
+        const lawyerProfileId = lawyerResult.rows[0].id;
+
+        const result = await pool.query(
+            `UPDATE consultations SET status = $1 WHERE id = $2 AND lawyer_profile_id = $3 RETURNING *`,
+            [status, id, lawyerProfileId]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Consultation not found or not yours.' });
+        res.json({ message: `Request ${status}.`, consultation: result.rows[0] });
+    } catch (error) {
+        console.error('Update consultation error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/consultations/:id/messages — fetch chat history for a consultation
+app.get('/api/consultations/:id/messages', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const { id } = req.params;
+    
+    try {
+        // Basic auth check: Ensure the user is either the client or the lawyer for this consultation
+        const consultationCheck = await pool.query(
+            `SELECT c.id FROM consultations c 
+             LEFT JOIN lawyer_profiles lp ON c.lawyer_profile_id = lp.id
+             WHERE c.id = $1 AND (c.user_id = $2 OR lp.user_id = $2)`,
+            [id, userId]
+        );
+        
+        if (consultationCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Unauthorized access to this consultation.' });
+        }
+
+        const result = await pool.query(`
+            SELECT m.*, u.email as sender_email, u.role as sender_role
+            FROM consultation_messages m
+            JOIN users u ON m.sender_id = u.id
+            WHERE m.consultation_id = $1
+            ORDER BY m.created_at ASC
+        `, [id]);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Fetch messages error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// POST /api/consultations/:id/messages — send a message
+app.post('/api/consultations/:id/messages', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    const { id } = req.params;
+    const { message } = req.body;
+    
+    if (!message || message.trim() === '') {
+        return res.status(400).json({ error: 'Message cannot be empty' });
+    }
+
+    try {
+        // Basic auth check: Ensure the user is either the client or the lawyer for this consultation
+        const consultationCheck = await pool.query(
+            `SELECT c.id, c.status FROM consultations c 
+             LEFT JOIN lawyer_profiles lp ON c.lawyer_profile_id = lp.id
+             WHERE c.id = $1 AND (c.user_id = $2 OR lp.user_id = $2)`,
+            [id, userId]
+        );
+        
+        if (consultationCheck.rows.length === 0) {
+            return res.status(403).json({ error: 'Unauthorized access to this consultation.' });
+        }
+        
+        if (consultationCheck.rows[0].status !== 'accepted') {
+            return res.status(400).json({ error: 'Cannot send messages until consultation is accepted.' });
+        }
+
+        const result = await pool.query(
+            `INSERT INTO consultation_messages (consultation_id, sender_id, message) 
+             VALUES ($1, $2, $3) RETURNING *`,
+            [id, userId, message]
+        );
+        
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error('Send message error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 
 // ----------------------------------------------------------------------
 // INTERVIEW QUESTIONS CRUD (ADMIN)

@@ -60,6 +60,7 @@ export interface LawyerProfile {
   years_of_experience: string;
   phone: string;
   cnic: string;
+  status?: string;
 }
 
 interface AppContextType {

@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router';
 import { Button } from './ui/button';
 import { useAppContext } from '../context/AppContext';
-import { LogOut, User, Menu, X } from 'lucide-react';
+import { LogOut, User, Menu, X, FileText } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 
 export function Header() {
@@ -171,6 +171,16 @@ export function Header() {
                   
                   {showUserMenu && (
                     <div className="absolute top-full right-0 mt-2 w-48 bg-white border border-border rounded-[10px] shadow-[0px_8px_24px_rgba(15,23,42,0.15)] py-2 z-50" ref={menuRef}>
+                      {userRole === 'user' && (
+                        <Link 
+                          to="/my-consultations"
+                          onClick={() => setShowUserMenu(false)}
+                          className="w-full px-4 py-2 text-left text-[14px] text-foreground hover:bg-accent flex items-center gap-2"
+                        >
+                          <FileText className="w-4 h-4" />
+                          My Consultations
+                        </Link>
+                      )}
                       <button
                         onClick={handleLogout}
                         className="w-full px-4 py-2 text-left text-[14px] text-foreground hover:bg-accent flex items-center gap-2"
@@ -224,11 +234,20 @@ export function Header() {
                     </Button>
                   </Link>
                 ) : (
-                  <Link to={userRole === 'lawyer' ? '/lawyer-dashboard' : '/chat'} onClick={() => setShowMobileMenu(false)} className="w-full">
-                    <Button className="bg-primary text-white hover:bg-primary/90 w-full">
-                      My Dashboard
-                    </Button>
-                  </Link>
+                  <div className="flex flex-col gap-2 w-full">
+                    <Link to={userRole === 'lawyer' ? '/lawyer-dashboard' : '/chat'} onClick={() => setShowMobileMenu(false)} className="w-full">
+                      <Button className="bg-primary text-white hover:bg-primary/90 w-full">
+                        {userRole === 'lawyer' ? 'My Dashboard' : 'New Legal Check'}
+                      </Button>
+                    </Link>
+                    {userRole === 'user' && (
+                      <Link to="/my-consultations" onClick={() => setShowMobileMenu(false)} className="w-full">
+                        <Button variant="outline" className="w-full border-border">
+                          My Consultations
+                        </Button>
+                      </Link>
+                    )}
+                  </div>
                 )
             ) : (
               <Link to="/signup" onClick={() => setShowMobileMenu(false)} className="w-full">

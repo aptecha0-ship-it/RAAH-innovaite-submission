@@ -18,6 +18,8 @@ import { AdminAiSystem } from './pages/AdminAiSystem';
 import { AdminLawyers } from './pages/AdminLawyers';
 import { AdminPayments } from './pages/AdminPayments';
 import { AdminAnalytics } from './pages/AdminAnalytics';
+import { MatchedLawyers } from './pages/MatchedLawyers';
+import { UserConsultations } from './pages/UserConsultations';
 
 export const router = createBrowserRouter([
   {
@@ -95,5 +97,13 @@ export const router = createBrowserRouter([
   {
     path: '/why-join-raah',
     Component: WhyJoinRaah,
+  },
+  {
+    path: '/matched-lawyers',
+    Component: MatchedLawyers,
+  },
+  {
+    path: '/my-consultations',
+    Component: UserConsultations,
   },
 ]);

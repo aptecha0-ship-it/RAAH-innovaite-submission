@@ -5,17 +5,35 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { useAppContext } from '../context/AppContext';
 import { MessageCircle, Send, Shield, Loader2, Trash2, Menu, X, UserCheck } from 'lucide-react';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 
-interface LawyerSuggestion {
-  name: string;
-  specialization: string;
-  city: string;
-  experience: string;
-  reason: string;
-  phone?: string;
-  email?: string;
+// Fetch active AI config from the server (model + api keys + generic prompt)
+async function fetchAiConfig(): Promise<{ active_model: string; gemini_api_key: string; grok_api_key: string; system_prompt: string }> {
+  const token = localStorage.getItem('auth_token');
+  const res = await fetch('/api/chat-key', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error('Could not load AI configuration from server.');
+  return res.json();
 }
+
+const DEFAULT_SYSTEM_PROMPT = `You are a compassionate, expert Legal Guide for RAAH — a platform that helps women in Pakistan understand their legal rights and options. Your specialty is domestic violence, khula, divorce, harassment, inheritance, and family law.
+
+TONE & STYLE:
+- Warm, human, and professional. Use contractions (don't, it's, you're). Vary sentence lengths.
+- Never sound robotic or clinical. Sound like a trusted friend who also happens to be a lawyer.
+
+STRICT CONVERSATION RULES — follow these without exception:
+1. The "One-Inquiry" Rule: Never provide more than ONE piece of legal information OR ask more than ONE question per response. If you find yourself writing more, stop and cut it down.
+2. Micro-Dose Information: Keep responses to a maximum of 3 SHORT paragraphs. No walls of text. No bullet-point dumps.
+3. Empathetic Validation First: Always acknowledge the user's emotional state BEFORE giving any legal information. Use phrases like "I hear you," "That sounds incredibly difficult," "It's brave of you to reach out."
+4. End With a Next Step: Every single response must end with either a simple guiding question OR a clear "next step" — never leave the user without direction.
+5. No Legalese: If you must use a legal term, immediately define it in plain everyday language in the same sentence.
+6. Never ask for info you already have: Check the intake profile below first.
+
+EXAMPLE OF HOW TO RESPOND:
+User: "I want to leave my husband but I'm scared about my kids and home."
+Good response: "I'm so sorry you're going through this — it takes real courage to even say those words. The good news is the law does have protections for both your home and your children. We can figure this out together, one step at a time. To start — is your biggest worry right now about staying safe in the house, or about the kids?"`;
 
 export function AIChat() {
   const navigate = useNavigate();
@@ -31,6 +49,14 @@ export function AIChat() {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRecommending, setIsRecommending] = useState(false);
+  const [activeModel, setActiveModel] = useState<string>('gemini');
+
+  // Fetch and cache active model label for display
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchAiConfig().then(cfg => setActiveModel(cfg.active_model)).catch(() => {});
+    }
+  }, [isAuthenticated]);
 
   // Redirect to signup if not authenticated
   useEffect(() => {
@@ -46,16 +72,18 @@ export function AIChat() {
     }
   }, [isAuthenticated, guidanceSummary, userProfile]);
 
-  // Initial greeting prompt if chat history is totally blank for the current active session
+  // Initial greeting prompt when a new blank session is started.
+  // createNewSession() sets activeSessionId to null — that's our trigger.
+  // addMessage auto-creates the session when the greeting is injected.
   useEffect(() => {
-    if (isAuthenticated && activeSessionId && currentChat.length === 0 && !isTyping) {
+    if (isAuthenticated && activeSessionId === null) {
       addMessage({
         id: 'initial_greeting',
         role: 'assistant',
         content: "Hello. I am RAAH's Legal AI Assistant. I am here to help you understand your legal options safely and securely. How can I assist you today?"
       });
     }
-  }, [isAuthenticated, activeSessionId, currentChat.length]);
+  }, [isAuthenticated, activeSessionId]);
 
   const generateSummary = (profile: any) => {
     setIsGeneratingSummary(true);
@@ -123,103 +151,130 @@ export function AIChat() {
     setIsRecommending(true);
     setIsSidebarOpen(false);
 
-    // Add a 'thinking' message from the assistant
-    addMessage({
-      id: Date.now().toString(),
-      role: 'assistant',
-      content: '🔍 Analyzing your case… I am reviewing your profile and our conversation to find the best-matched verified lawyers for you. This will just take a moment.',
-    });
-
     try {
-      const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-      if (!apiKey) throw new Error('Gemini API key missing');
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('/api/recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          userProfile,
+          chatMessages: currentChat.slice(-8),
+        }),
+      });
 
-      // Fetch verified lawyers
-      const lawyersRes = await fetch('/api/lawyers');
-      const lawyers = lawyersRes.ok ? await lawyersRes.json() : [];
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Could not load recommendations.');
+      }
 
-      if (!lawyers || lawyers.length === 0) {
+      const data = await res.json();
+      const recommendations = data.recommendations || [];
+
+      if (recommendations.length === 0) {
         addMessage({
-          id: (Date.now() + 1).toString(),
+          id: Date.now().toString(),
           role: 'assistant',
-          content: "I'm sorry, I couldn't find any verified lawyers available at the moment. Please try again soon or browse the Verified Lawyers page.",
+          content: "No matched lawyers were found yet. The administrator may need to approve and sync lawyer profiles first. Please try again later or browse the Lawyers page.",
         });
-        setIsRecommending(false);
         return;
       }
 
-      // Build a summarized chat context (last 10 messages in active session)
-      const chatContext = currentChat
-        .slice(-10)
-        .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
-        .join('\n');
+      // Navigate to the dedicated matched-lawyers page, passing results via state
+      navigate('/matched-lawyers', { state: { recommendations } });
 
-      // Build matching prompt
-      const matchPrompt = `You are a legal case matching assistant for RAAH, a platform helping women in Pakistan.
-
-You must select the TOP 3 most suitable verified lawyers from the list below for this user.
-
-USER PROFILE (from initial interview):
-${userProfile ? JSON.stringify(userProfile, null, 2) : 'Not available'}
-
-RECENT CHAT CONTEXT:
-${chatContext || 'No chat history yet.'}
-
-AVAILABLE VERIFIED LAWYERS (JSON array):
-${JSON.stringify(lawyers.slice(0, 20), null, 2)}
-
-INSTRUCTIONS:
-- Carefully consider the user's legal concern, urgency, location (province/city), and case details.
-- Prioritize lawyers whose practice areas align with the user's legal concern.
-- Briefly explain WHY each lawyer is a good fit (1-2 sentences).
-- Respond ONLY with a valid JSON array of top 3 recommended lawyers in this exact format:
-[
-  {
-    "name": "Full Name",
-    "specialization": "Specialization",
-    "city": "City",
-    "experience": "X years",
-    "reason": "Why this lawyer is a good match.",
-    "phone": "phone or null",
-    "email": "email or null"
-  }
-]
-Return ONLY the JSON array, no extra text.`;
-
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-      const result = await model.generateContent(matchPrompt);
-      const raw = result.response.text().trim();
-
-      // Clean possible markdown fences
-      const cleaned = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
-      const recommendations: LawyerSuggestion[] = JSON.parse(cleaned);
-
-      // Inject recommendation into chat as a special assistant message
-      const recContent = `__LAWYER_RECS__:${JSON.stringify(recommendations)}`;
-      addMessage({
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: recContent,
-      });
-
-    } catch (err) {
+    } catch (err: any) {
       console.error('Lawyer recommendation failed:', err);
       addMessage({
-        id: (Date.now() + 1).toString(),
+        id: Date.now().toString(),
         role: 'assistant',
-        content: "I had trouble generating lawyer recommendations right now. Please try again in a moment.",
+        content: `I had trouble finding recommendations: ${err.message || 'Please try again in a moment.'}`,
       });
     } finally {
       setIsRecommending(false);
     }
   };
 
+
+  const reportApiError = async (provider: string, errorMessage: string) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      await fetch('/api/ai-settings/report-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ provider, error_message: errorMessage })
+      });
+    } catch {
+      // silently fail
+    }
+  };
+
+  const callGrok = async (apiKey: string, systemPrompt: string, userMessage: string): Promise<string> => {
+    const grokMessages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+      { role: 'system', content: systemPrompt },
+    ];
+    for (const msg of currentChat.filter(m => m.id !== 'initial_greeting')) {
+      grokMessages.push({
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.content,
+      });
+    }
+    grokMessages.push({ role: 'user', content: userMessage });
+
+    const res = await fetch('https://api.x.ai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: 'grok-3', messages: grokMessages, temperature: 0.7 }),
+    });
+    
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody?.error?.message || `Grok API error ${res.status}`);
+    }
+    
+    const data = await res.json();
+    return data.choices?.[0]?.message?.content?.trim() || 'I had trouble generating a response.';
+  };
+
+  const callGemini = async (apiKey: string, systemPrompt: string, userMessage: string): Promise<string> => {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-2.5-flash', 
+      systemInstruction: systemPrompt,
+      safetySettings: [
+        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+      ]
+    });
+
+    const rawHistory = currentChat.filter(msg => msg.id !== 'initial_greeting');
+    const formattedHistory: { role: string; parts: { text: string }[] }[] = [];
+    let lastRole = '';
+    
+    for (const msg of rawHistory) {
+      const currentRole = msg.role === 'user' ? 'user' : 'model';
+      if (formattedHistory.length === 0 && currentRole === 'model') {
+        formattedHistory.push({ role: 'user', parts: [{ text: 'Hello' }] });
+        lastRole = 'user';
+      }
+      if (currentRole === lastRole && formattedHistory.length > 0) {
+        formattedHistory[formattedHistory.length - 1].parts[0].text += `\n\n[Message continued]\n${msg.content}`;
+      } else {
+        formattedHistory.push({ role: currentRole, parts: [{ text: msg.content }] });
+      }
+      lastRole = currentRole;
+    }
+
+    const chat = model.startChat({ history: formattedHistory });
+    const result = await chat.sendMessage(userMessage);
+    return result.response.text();
+  };
+
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || isTyping) return;
 
     const userMessage = inputMessage;
-    // Add user message
     addMessage({
       id: Date.now().toString(),
       role: 'user',
@@ -230,29 +285,21 @@ Return ONLY the JSON array, no extra text.`;
     setIsTyping(true);
 
     try {
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error('Gemini API key is not configured');
+      const aiConfig = await fetchAiConfig();
+      const primaryModel = aiConfig.active_model;
+      const primaryKey = primaryModel === 'grok' ? aiConfig.grok_api_key : aiConfig.gemini_api_key;
+      const secondaryModel = primaryModel === 'grok' ? 'gemini' : 'grok';
+      const secondaryKey = primaryModel === 'grok' ? aiConfig.gemini_api_key : aiConfig.grok_api_key;
+
+      if (!primaryKey && !secondaryKey) {
+          throw new Error('No API key configured. Please ask the admin to set up an AI API key.');
       }
 
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const systemPrompt = `You are a compassionate, expert Legal Guide for RAAH — a platform that helps women in Pakistan understand their legal rights and options. Your specialty is domestic violence, khula, divorce, harassment, inheritance, and family law.
+      const basePrompt = aiConfig.system_prompt && aiConfig.system_prompt.trim() !== '' 
+        ? aiConfig.system_prompt 
+        : DEFAULT_SYSTEM_PROMPT;
 
-TONE & STYLE:
-- Warm, human, and professional. Use contractions (don't, it's, you're). Vary sentence lengths.
-- Never sound robotic or clinical. Sound like a trusted friend who also happens to be a lawyer.
-
-STRICT CONVERSATION RULES — follow these without exception:
-1. The "One-Inquiry" Rule: Never provide more than ONE piece of legal information OR ask more than ONE question per response. If you find yourself writing more, stop and cut it down.
-2. Micro-Dose Information: Keep responses to a maximum of 3 SHORT paragraphs. No walls of text. No bullet-point dumps.
-3. Empathetic Validation First: Always acknowledge the user's emotional state BEFORE giving any legal information. Use phrases like "I hear you," "That sounds incredibly difficult," "It's brave of you to reach out."
-4. End With a Next Step: Every single response must end with either a simple guiding question OR a clear "next step" — never leave the user without direction.
-5. No Legalese: If you must use a legal term, immediately define it in plain everyday language in the same sentence.
-6. Never ask for info you already have: Check the intake profile below first.
-
-EXAMPLE OF HOW TO RESPOND:
-User: "I want to leave my husband but I'm scared about my kids and home."
-Good response: "I'm so sorry you're going through this — it takes real courage to even say those words. The good news is the law does have protections for both your home and your children. We can figure this out together, one step at a time. To start — is your biggest worry right now about staying safe in the house, or about the kids?"
+      const systemPromptText = `${basePrompt}
 
 ${userProfile ? `INTAKE PROFILE (already collected — do NOT ask for this information again):
 - Primary Concern: ${userProfile.legalConcern || 'Not specified'}
@@ -267,60 +314,49 @@ ${userProfile ? `INTAKE PROFILE (already collected — do NOT ask for this infor
 - Consultant Preference: ${userProfile.consultantPreference || 'Not specified'}
 Use this profile to tailor every response. Never ask the user to repeat anything already captured above.` : 'No intake profile available. Gently gather context through conversation, one question at a time.'}`;
 
-      const model = genAI.getGenerativeModel({
-        model: 'gemini-2.5-flash',
-        systemInstruction: systemPrompt
-      });
-
-      // Convert chat history for Gemini, ensuring we omit the local greeting
-      // Gemini requires the history array to start with a 'user' message and STRICTLY ALTERNATE
-      const rawHistory = currentChat.filter(msg => msg.id !== 'initial_greeting');
-      const formattedHistory: { role: string, parts: { text: string }[] }[] = [];
-
-      let lastRole = '';
-      for (const msg of rawHistory) {
-        const currentRole = msg.role === 'user' ? 'user' : 'model';
+      let responseText = '';
+      
+      try {
+        if (!primaryKey) throw new Error(`${primaryModel} key is missing.`);
         
-        // Skip leading model messages if we don't have a user message yet
-        if (formattedHistory.length === 0 && currentRole === 'model') {
-           // We'll inject a dummy user request if the history somehow starts with a model message
-           formattedHistory.push({ role: 'user', parts: [{ text: 'Hello' }] });
-           lastRole = 'user';
-        }
+        // Attempt Primary Model
+        responseText = primaryModel === 'grok' 
+            ? await callGrok(primaryKey, systemPromptText, userMessage)
+            : await callGemini(primaryKey, systemPromptText, userMessage);
+            
+      } catch (primaryError: any) {
+        console.warn(`Primary model (${primaryModel}) failed:`, primaryError.message);
+        reportApiError(primaryModel, primaryError.message || String(primaryError));
 
-        if (currentRole === lastRole && formattedHistory.length > 0) {
-          // If the role is the same as the last one, concatenate the text to avoid throwing an error
-          const lastIndex = formattedHistory.length - 1;
-          formattedHistory[lastIndex].parts[0].text += `\n\n[Message continued]\n${msg.content}`;
+        if (secondaryKey) {
+            console.log(`Falling back to secondary model (${secondaryModel})...`);
+            try {
+                responseText = secondaryModel === 'grok'
+                    ? await callGrok(secondaryKey, systemPromptText, userMessage)
+                    : await callGemini(secondaryKey, systemPromptText, userMessage);
+            } catch (secondaryError: any) {
+                console.error(`Secondary model (${secondaryModel}) also failed:`, secondaryError.message);
+                reportApiError(secondaryModel, secondaryError.message || String(secondaryError));
+                throw new Error('Both AI models failed to respond.');
+            }
         } else {
-          // Normal alternating role
-          formattedHistory.push({
-            role: currentRole,
-            parts: [{ text: msg.content }]
-          });
+            throw primaryError;
         }
-        lastRole = currentRole;
       }
-
-
-      const chat = model.startChat({
-        history: formattedHistory,
-      });
-
-      const result = await chat.sendMessage(userMessage);
-      const responseText = result.response.text();
 
       addMessage({
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         content: responseText,
       });
-    } catch (error) {
-      console.error('Error calling Gemini API:', error);
+    } catch (error: any) {
+      console.error('Error calling AI API:', error);
       addMessage({
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'I apologize, but I am currently experiencing technical difficulties connecting to my knowledge base.',
+        content: error?.message?.includes('No API key')
+          ? 'The AI chatbot is not configured yet. Please contact the administrator to set up an API key.'
+          : 'I apologize, but I am currently experiencing technical difficulties connecting to my knowledge base.',
       });
     } finally {
       setIsTyping(false);
@@ -449,6 +485,12 @@ Use this profile to tailor every response. Never ask the user to repeat anything
               <button className="text-[13px] text-secondary hover:underline block w-full text-left">
                 Help & Safety
               </button>
+              <div className="flex items-center gap-1.5 pt-1">
+                <Shield className="w-3 h-3 text-slate-400" />
+                <span className="text-[11px] text-slate-400">
+                  Powered by {activeModel === 'grok' ? 'xAI Grok' : 'Google Gemini'}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -479,47 +521,6 @@ Use this profile to tailor every response. Never ask the user to repeat anything
                  </div>
               ) : (
                 currentChat.map((message) => {
-                  // Special rendering for lawyer recommendation messages
-                  if (message.role === 'assistant' && message.content.startsWith('__LAWYER_RECS__:')) {
-                    const raw = message.content.replace('__LAWYER_RECS__:', '');
-                    let recs: LawyerSuggestion[] = [];
-                    try { recs = JSON.parse(raw); } catch {}
-                    return (
-                      <div key={message.id} className="flex justify-start w-full">
-                        <div className="w-full max-w-[90%] space-y-3">
-                          <p className="text-[14px] font-semibold text-foreground flex items-center gap-2">
-                            <UserCheck className="w-4 h-4 text-secondary" />
-                            Based on your case, here are the best-matched verified lawyers for you:
-                          </p>
-                          {recs.map((lawyer, i) => (
-                            <div key={i} className="bg-white border border-border rounded-[12px] p-4 shadow-sm">
-                              <div className="flex items-start justify-between gap-3 flex-wrap">
-                                <div className="flex-1">
-                                  <h4 className="text-[15px] font-semibold text-foreground">{lawyer.name}</h4>
-                                  <p className="text-[13px] text-secondary font-medium">{lawyer.specialization}</p>
-                                  <p className="text-[12px] text-muted-foreground">{lawyer.city} · {lawyer.experience}</p>
-                                  <p className="text-[13px] text-slate-600 mt-2 italic">"{lawyer.reason}"</p>
-                                </div>
-                                <div className="flex flex-col gap-2 shrink-0">
-                                  {lawyer.phone && (
-                                    <a href={`tel:${lawyer.phone}`} className="text-[12px] bg-primary text-white px-3 py-1.5 rounded-full hover:bg-primary/90 transition-colors text-center">
-                                      Call
-                                    </a>
-                                  )}
-                                  {lawyer.email && (
-                                    <a href={`mailto:${lawyer.email}`} className="text-[12px] border border-primary text-primary px-3 py-1.5 rounded-full hover:bg-primary/5 transition-colors text-center">
-                                      Email
-                                    </a>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  }
-
                   return (
                     <div
                       key={message.id}
