@@ -126,10 +126,13 @@ export function PeerConsultantDashboard() {
 
   return (
     <div 
-      className="min-h-screen bg-center bg-no-repeat"
+      className="min-h-screen"
       style={{
-        backgroundSize: '100% 100%',
         backgroundImage: 'url("/Lawyer dashboard.png")',
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+        backgroundAttachment: 'fixed',
+        backgroundRepeat: 'no-repeat',
       }}
     >
       <Header />
