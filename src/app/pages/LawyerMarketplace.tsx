@@ -207,12 +207,21 @@ export function LawyerMarketplace() {
   const defaultSpecs = ['Family Law', 'Domestic Violence', "Women's Rights", 'Divorce', 'Child Custody'];
 
   return (
-    <div className="min-h-screen bg-white">
+    <div
+      className="min-h-screen"
+      style={{
+        backgroundImage: 'url("/varified lawyers.png")',
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+        backgroundAttachment: 'fixed',
+        backgroundRepeat: 'no-repeat',
+      }}
+    >
       <Header />
 
       <div className="max-w-[1200px] mx-auto px-6 py-12">
         {/* Page Header */}
-        <div className="mb-8">
+        <div className="mb-8 bg-white/60 backdrop-blur-sm rounded-[14px] px-6 py-5">
           <h1 className="text-[32px] font-semibold text-foreground mb-2">
             Verified Lawyers Marketplace
           </h1>
@@ -222,11 +231,11 @@ export function LawyerMarketplace() {
         </div>
 
         {/* Filters */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 bg-white/60 backdrop-blur-sm rounded-[12px] p-4">
           <select
             value={cityFilter}
             onChange={e => setCityFilter(e.target.value)}
-            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white"
+            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white/80"
           >
             {cities.map(c => (
               <option key={c} value={c}>{c}</option>
@@ -236,7 +245,7 @@ export function LawyerMarketplace() {
           <select
             value={specFilter}
             onChange={e => setSpecFilter(e.target.value)}
-            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white"
+            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white/80"
           >
             <option value="All Specializations">All Specializations</option>
             {defaultSpecs.map(s => (
@@ -247,7 +256,7 @@ export function LawyerMarketplace() {
           <select
             value={expFilter}
             onChange={e => setExpFilter(e.target.value)}
-            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white"
+            className="px-4 py-2.5 border border-border rounded-[10px] text-[15px] text-foreground bg-white/80"
           >
             <option value="All Experience">All Experience</option>
             <option value="5+ years">5+ years</option>
@@ -260,19 +269,19 @@ export function LawyerMarketplace() {
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               placeholder="Search lawyers..."
-              className="pl-10 rounded-[10px]"
+              className="pl-10 rounded-[10px] bg-white/80"
             />
           </div>
         </div>
 
         {/* Lawyer Grid */}
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
+          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground bg-white/60 backdrop-blur-sm rounded-[16px]">
             <Loader2 className="w-8 h-8 animate-spin mb-4" />
             <p>Loading verified lawyers...</p>
           </div>
         ) : filteredLawyers.length === 0 ? (
-          <div className="text-center py-20 text-muted-foreground bg-slate-50 rounded-[10px] border border-border">
+          <div className="text-center py-20 text-muted-foreground bg-white/70 backdrop-blur-sm rounded-[10px] border border-border">
             <p className="text-[16px] font-medium text-slate-600">
               No lawyers found matching your filters.
             </p>
@@ -294,7 +303,7 @@ export function LawyerMarketplace() {
             {filteredLawyers.map(lawyer => (
               <div
                 key={lawyer.id}
-                className="bg-white border border-border rounded-[10px] p-6 shadow-[0px_8px_24px_rgba(15,23,42,0.08)] hover:shadow-[0px_12px_32px_rgba(15,23,42,0.12)] transition-shadow"
+                className="bg-white/75 backdrop-blur-md border border-white/50 rounded-[10px] p-6 shadow-[0px_8px_24px_rgba(15,23,42,0.10)] hover:shadow-[0px_12px_32px_rgba(15,23,42,0.15)] hover:bg-white/90 transition-all"
               >
                 <div className="flex items-start justify-between mb-4">
                   <div>

@@ -88,12 +88,16 @@ export function MatchedLawyers() {
     setSendingId(lawyer.id);
     try {
       const token = localStorage.getItem('auth_token');
+      const profileRaw = localStorage.getItem('user_profile');
+      const intakeProfile = profileRaw ? JSON.parse(profileRaw) : null;
+
       const res = await fetch('/api/consultations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           lawyerProfileId: lawyer.id,
           userSummary: userSummary.trim() || undefined,
+          intakeProfile: intakeProfile,
         }),
       });
       if (res.status === 409) {
@@ -111,7 +115,13 @@ export function MatchedLawyers() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50/30">
+    <div
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'url("/user dashboard.png")',
+      }}
+    >
       <Header />
 
       <div className="max-w-[900px] mx-auto px-4 sm:px-6 py-8 lg:py-12">
@@ -140,7 +150,7 @@ export function MatchedLawyers() {
 
         {/* Loading */}
         {loading && (
-          <div className="flex flex-col items-center justify-center py-24 gap-4">
+          <div className="flex flex-col items-center justify-center py-24 gap-4 bg-white/60 backdrop-blur-sm rounded-[16px]">
             <Loader2 className="w-10 h-10 animate-spin text-primary" />
             <p className="text-slate-500 text-[15px]">Finding the best-matched lawyers for your case…</p>
           </div>
@@ -148,7 +158,7 @@ export function MatchedLawyers() {
 
         {/* Error */}
         {!loading && error && (
-          <div className="bg-amber-50 border border-amber-200 rounded-[12px] p-6 text-center">
+          <div className="bg-amber-50/80 backdrop-blur-sm border border-amber-200 rounded-[12px] p-6 text-center">
             <p className="text-amber-800 text-[14px] font-medium mb-4">{error}</p>
             <Button onClick={fetchRecommendations} variant="outline" size="sm">Try Again</Button>
           </div>
@@ -164,7 +174,7 @@ export function MatchedLawyers() {
               return (
                 <div
                   key={lawyer.id}
-                  className={`relative rounded-[20px] border-2 ${theme.border} ${theme.bg} p-6 sm:p-8 shadow-[0px_8px_32px_rgba(15,23,42,0.06)] transition-all`}
+                  className={`relative rounded-[20px] border-2 ${theme.border} p-6 sm:p-8 shadow-[0px_8px_32px_rgba(15,23,42,0.10)] transition-all backdrop-blur-md bg-white/70`}
                 >
                   {/* Rank badge */}
                   <div className="flex items-start justify-between mb-5 flex-wrap gap-3">
@@ -272,7 +282,7 @@ export function MatchedLawyers() {
                   )}
                   {status === 'idle' && (
                     confirmId === lawyer.id ? (
-                      <div className="bg-white/80 rounded-[12px] border border-slate-200 p-4 space-y-3">
+                      <div className="bg-white/90 backdrop-blur-sm rounded-[12px] border border-slate-200 p-4 space-y-3">
                         <p className="text-[13px] text-slate-700 font-medium">
                           Add a short note for {lawyer.full_name} <span className="text-slate-400 font-normal">(optional)</span>
                         </p>
@@ -318,7 +328,7 @@ export function MatchedLawyers() {
             })}
 
             {/* Bottom info note */}
-            <div className="flex items-start gap-3 bg-slate-50 border border-slate-200 rounded-[12px] p-4 mt-4">
+            <div className="flex items-start gap-3 bg-white/60 backdrop-blur-sm border border-slate-200 rounded-[12px] p-4 mt-4">
               <Shield className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
               <p className="text-[12px] text-slate-500 leading-relaxed">
                 All lawyers on RAAH are verified by our administrative team. By sending a request, 

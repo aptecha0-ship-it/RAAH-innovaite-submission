@@ -3,7 +3,7 @@ import { Header } from '../components/Header';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
-import { CheckCircle, Star, TrendingUp, ArrowLeft, Bot, FileText, Send, Languages, Book, Bell, Clock, CheckCircle2, XCircle, Loader2, MessageCircle } from 'lucide-react';
+import { CheckCircle, Star, TrendingUp, ArrowLeft, Bot, FileText, Send, Languages, Book, Bell, Clock, CheckCircle2, XCircle, Loader2, MessageCircle, Users, Briefcase, Video, ExternalLink } from 'lucide-react';
 import { Link } from 'react-router';
 import { useAppContext } from '../context/AppContext';
 import { InstantChat } from '../components/InstantChat';
@@ -13,6 +13,7 @@ interface Consultation {
   user_id: number;
   user_email: string;
   user_summary: string | null;
+  intake_profile?: any;
   status: 'pending' | 'accepted' | 'declined';
   created_at: string;
 }
@@ -28,12 +29,30 @@ export function LawyerDashboard() {
   const [consultLoading, setConsultLoading] = useState(true);
   const [actioningId, setActioningId] = useState<number | null>(null);
   const [activeChatId, setActiveChatId] = useState<number | null>(null);
+  
+  const [consultantProfile, setConsultantProfile] = useState<any>(null);
+  const [showApplyModal, setShowApplyModal] = useState(false);
+  const [applyForm, setApplyForm] = useState({ title: '', bio: '', rate: 1000 });
+  const [isApplying, setIsApplying] = useState(false);
+  const [applyError, setApplyError] = useState('');
+
+  // Sent peer consultation requests (as a requester)
+  const [peerRequests, setPeerRequests] = useState<any[]>([]);
+  const [peerRequestsLoading, setPeerRequestsLoading] = useState(false);
+  const [dashboardStats, setDashboardStats] = useState({
+    subscriptionStatus: 'Pending Verification',
+    leadsThisWeek: 0,
+    rating: 'N/A'
+  });
 
   const isPending = lawyerProfile?.status === 'pending';
 
   useEffect(() => {
     if (!isPending) {
       fetchConsultations();
+      fetchConsultantProfile();
+      fetchPeerRequests();
+      fetchDashboardStats();
     }
   }, [isPending]);
 
@@ -52,6 +71,89 @@ export function LawyerDashboard() {
       console.error('Failed to fetch consultations:', err);
     } finally {
       setConsultLoading(false);
+    }
+  };
+
+  const fetchConsultantProfile = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('/api/consultations/me', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setConsultantProfile(data);
+      } else if (res.status === 404) {
+        setConsultantProfile('none');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchPeerRequests = async () => {
+    setPeerRequestsLoading(true);
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('/api/consultations/requests', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPeerRequests(data.sent || []);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPeerRequestsLoading(false);
+    }
+  };
+
+  const fetchDashboardStats = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('/api/lawyer/dashboard-stats', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDashboardStats(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch dashboard stats', err);
+    }
+  };
+
+  const handleApplyConsultant = async () => {
+    setIsApplying(true);
+    setApplyError('');
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch('/api/consultations/apply', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          title: applyForm.title,
+          bio_snippet: applyForm.bio,
+          rate_per_session: applyForm.rate
+        })
+      });
+
+      if (res.ok) {
+        setShowApplyModal(false);
+        fetchConsultantProfile();
+      } else {
+        const data = await res.json();
+        setApplyError(data.error || 'Failed to apply');
+      }
+    } catch (err) {
+      console.error(err);
+      setApplyError('An unexpected error occurred. Please try again.');
+    } finally {
+      setIsApplying(false);
     }
   };
 
@@ -99,7 +201,13 @@ export function LawyerDashboard() {
   };
 
   return (
-    <div className="min-h-screen bg-white">
+    <div 
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'url("/Lawyer dashboard.png")',
+      }}
+    >
       <Header />
       
       <div className="max-w-[1200px] mx-auto px-6 py-12">
@@ -153,6 +261,47 @@ export function LawyerDashboard() {
               <Bot className="w-4 h-4 mr-2" />
               AI Legal Assistant
             </Button>
+            {consultantProfile === null ? (
+              <div className="w-[185px] h-10 bg-slate-200/50 animate-pulse rounded-[10px]"></div>
+            ) : consultantProfile === 'none' ? (
+              <Button
+                onClick={() => setShowApplyModal(true)}
+                className="bg-primary hover:bg-primary/90 text-white h-10 px-4 text-[14px] font-medium rounded-[10px]"
+              >
+                <Briefcase className="w-4 h-4 mr-2" />
+                Offer Consultations
+              </Button>
+            ) : !consultantProfile.is_approved ? (
+              <Button disabled className="bg-slate-100 text-slate-500 h-10 px-4 text-[14px] font-medium rounded-[10px] cursor-not-allowed">
+                <Clock className="w-4 h-4 mr-2" />
+                Application Pending
+              </Button>
+            ) : (
+              <Link to="/lawyer/consultant-dashboard">
+                <Button className="bg-primary hover:bg-primary/90 text-white h-10 px-4 text-[14px] font-medium rounded-[10px]">
+                  <Briefcase className="w-4 h-4 mr-2" />
+                  Manage Consultations
+                </Button>
+              </Link>
+            )}
+            <Link to="/lawyer/consultants">
+              <Button
+                variant="outline"
+                className="border-primary text-primary hover:bg-primary/5 h-10 px-4 text-[14px] font-medium rounded-[10px]"
+              >
+                <Users className="w-4 h-4 mr-2" />
+                Peer Consultations
+              </Button>
+            </Link>
+            <Link to="/lawyer-blog">
+              <Button
+                variant="outline"
+                className="border-primary text-primary hover:bg-primary/5 h-10 px-4 text-[14px] font-medium rounded-[10px]"
+              >
+                <Book className="w-4 h-4 mr-2" />
+                Write Blog
+              </Button>
+            </Link>
           </div>
         </div>
         
@@ -169,7 +318,7 @@ export function LawyerDashboard() {
                 <div className="inline-flex items-center gap-2 bg-accent px-3 py-1.5 rounded-full">
                   <CheckCircle className="w-4 h-4 text-secondary" />
                   <span className="text-[13px] font-semibold text-secondary">
-                    Professional Plan
+                    {dashboardStats.subscriptionStatus}
                   </span>
                 </div>
               </div>
@@ -197,7 +346,7 @@ export function LawyerDashboard() {
                   Rating
                 </h3>
                 <div className="flex items-center gap-2">
-                  <span className="text-[28px] font-bold text-foreground">N/A</span>
+                  <span className="text-[28px] font-bold text-foreground">{dashboardStats.rating}</span>
                   <Star className="w-5 h-5 text-muted-foreground" />
                 </div>
               </div>
@@ -266,6 +415,37 @@ export function LawyerDashboard() {
                         </div>
                       )}
 
+                      {c.intake_profile && (
+                        <div className="mb-4 bg-white/50 border border-slate-200 rounded-[10px] p-4 text-[13px]">
+                          <div className="flex items-center gap-1.5 mb-3 border-b border-slate-100 pb-2">
+                            <FileText className="w-4 h-4 text-primary" />
+                            <h4 className="font-semibold text-slate-800">Case Brief (AI Generated)</h4>
+                          </div>
+                          <div className="space-y-2.5">
+                            {c.intake_profile.legalConcern && (
+                              <div><span className="text-slate-400 font-medium">Concern:</span> <span className="text-slate-700 font-medium">{c.intake_profile.legalConcern}</span></div>
+                            )}
+                            {c.intake_profile.emergencyStatus && (
+                              <div>
+                                <span className="text-slate-400 font-medium">Urgency:</span> 
+                                <span className={`ml-1 px-1.5 py-0.5 rounded text-[11px] font-bold ${c.intake_profile.emergencyStatus === 'immediate' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
+                                  {c.intake_profile.emergencyStatus.toUpperCase()}
+                                </span>
+                              </div>
+                            )}
+                            {c.intake_profile.incidentDescription && (
+                              <div><span className="text-slate-400 font-medium">Incident:</span> <p className="text-slate-600 mt-0.5 leading-relaxed">{c.intake_profile.incidentDescription}</p></div>
+                            )}
+                            {c.intake_profile.safetyStatus && (
+                              <div><span className="text-slate-400 font-medium">Safety Status:</span> <span className="text-slate-700">{c.intake_profile.safetyStatus}</span></div>
+                            )}
+                            {c.intake_profile.evidence && (
+                              <div><span className="text-slate-400 font-medium">Evidence Available:</span> <span className="text-slate-700">{c.intake_profile.evidence}</span></div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {c.status === 'pending' && (
                         <div className="flex gap-2">
                           <Button
@@ -311,6 +491,58 @@ export function LawyerDashboard() {
               )}
             </div>
           </div>
+
+          {/* Peer Consultation Requests Sent */}
+          {peerRequests.length > 0 && (
+            <div className="mt-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-[20px] font-semibold text-foreground flex items-center gap-2">
+                  <Video className="w-5 h-5 text-primary" />
+                  My Peer Consultation Bookings
+                </h2>
+                <button onClick={fetchPeerRequests} className="text-[12px] text-primary hover:underline">Refresh</button>
+              </div>
+              {peerRequestsLoading ? (
+                <div className="flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+              ) : (
+                <div className="space-y-3">
+                  {peerRequests.map((req: any) => (
+                    <div key={req.id} className={`bg-white border rounded-[12px] p-5 shadow-[0px_4px_16px_rgba(15,23,42,0.06)] ${req.status === 'accepted' ? 'border-emerald-200' : req.status === 'declined' ? 'border-red-100 opacity-70' : 'border-amber-200'}`}>
+                      <div className="flex items-start justify-between mb-2 flex-wrap gap-2">
+                        <div>
+                          <p className="text-[14px] font-semibold text-foreground">Consultation with {req.consultant_name}</p>
+                          <p className="text-[12px] text-slate-500 mt-0.5">Requested: {new Date(req.created_at).toLocaleDateString('en-PK', { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+                        </div>
+                        <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${req.status === 'accepted' ? 'bg-emerald-100 text-emerald-700' : req.status === 'declined' ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-700'}`}>
+                          {req.status === 'accepted' ? 'Accepted' : req.status === 'declined' ? 'Declined' : 'Awaiting Response'}
+                        </span>
+                      </div>
+                      {req.status === 'accepted' && req.video_room_url && (
+                        <div className="mt-3 flex items-center gap-3 bg-primary/5 border border-primary/20 rounded-[10px] p-3">
+                          <Video className="w-5 h-5 text-primary shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[12px] font-semibold text-primary mb-0.5">Meeting link is ready!</p>
+                            <p className="text-[11px] text-slate-500 truncate">{req.video_room_url}</p>
+                          </div>
+                          <a href={req.video_room_url} target="_blank" rel="noopener noreferrer">
+                            <Button className="bg-primary text-white hover:bg-primary/90 h-9 px-4 text-[13px] gap-1.5">
+                              <ExternalLink className="w-3.5 h-3.5" /> Join Session
+                            </Button>
+                          </a>
+                        </div>
+                      )}
+                      {req.status === 'accepted' && !req.video_room_url && (
+                        <div className="mt-3 flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-[10px] p-3">
+                          <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                          <p className="text-[12px] text-amber-700">Waiting for consultant to share the meeting link…</p>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Right Sidebar - AI Assistant */}
           <div className="lg:col-span-1">
@@ -458,6 +690,79 @@ export function LawyerDashboard() {
             currentUserRole="lawyer"
             otherPartyName={consultations.find(c => c.id === activeChatId)?.user_email.split('@')[0] || 'User'}
           />
+        )}
+
+        {/* Apply for Consultant Modal */}
+        {showApplyModal && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-[16px] p-8 max-w-[500px] w-full shadow-[0px_24px_48px_rgba(0,0,0,0.2)]">
+              <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4">
+                <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                  <Briefcase className="w-5 h-5 text-primary" />
+                </div>
+                <div>
+                  <h3 className="text-[20px] font-semibold text-slate-800">Offer Consultations</h3>
+                  <p className="text-[13px] text-slate-500">Apply to become a peer consultant on RAAH.</p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[13px] font-medium text-slate-700 mb-1">Professional Title</label>
+                  <Input 
+                    placeholder="e.g. Senior Corporate Counsel" 
+                    value={applyForm.title}
+                    onChange={(e) => setApplyForm({...applyForm, title: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[13px] font-medium text-slate-700 mb-1">Brief Bio</label>
+                  <Textarea 
+                    placeholder="Briefly describe your expertise to other lawyers..." 
+                    value={applyForm.bio}
+                    onChange={(e) => setApplyForm({...applyForm, bio: e.target.value})}
+                    className="resize-none"
+                    rows={3}
+                  />
+                </div>
+                <div>
+                  <label className="block text-[13px] font-medium text-slate-700 mb-1">Rate per Session (PKR)</label>
+                  <Input 
+                    type="number"
+                    value={applyForm.rate}
+                    onChange={(e) => setApplyForm({...applyForm, rate: parseInt(e.target.value) || 0})}
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">Platform fee (15%) will be added to this.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-8">
+                {applyError && (
+                  <div className="bg-red-50 text-red-600 p-3 rounded-md text-[13px] border border-red-200 w-full mb-2">
+                    {applyError}
+                  </div>
+                )}
+              </div>
+              <div className="flex gap-3 mt-2">
+                <Button 
+                  onClick={() => setShowApplyModal(false)}
+                  variant="outline" 
+                  className="flex-1"
+                  disabled={isApplying}
+                >
+                  Cancel
+                </Button>
+                <Button 
+                  onClick={handleApplyConsultant}
+                  className="flex-1 bg-primary hover:bg-primary/90 text-white"
+                  disabled={!applyForm.title || !applyForm.bio || applyForm.rate <= 0 || isApplying}
+                >
+                  {isApplying ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                  {isApplying ? 'Submitting...' : 'Submit Application'}
+                </Button>
+              </div>
+            </div>
+          </div>
         )}
         </>
         )}

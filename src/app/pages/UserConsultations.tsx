@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Header } from '../components/Header';
 import { Button } from '../components/ui/button';
-import { Clock, CheckCircle2, XCircle, ArrowLeft, Send, MessageCircle, FileText, Bot } from 'lucide-react';
+import { Clock, CheckCircle2, XCircle, ArrowLeft, Send, MessageCircle, FileText, Bot, Video, ExternalLink, Link2 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router';
 import { InstantChat } from '../components/InstantChat';
 
@@ -12,6 +12,9 @@ interface Consultation {
   user_summary: string | null;
   status: 'pending' | 'accepted' | 'declined';
   created_at: string;
+  video_room_url?: string;
+  session_id?: number;
+  preferred_slot?: string;
 }
 
 export function UserConsultations() {
@@ -45,7 +48,13 @@ export function UserConsultations() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50/30">
+    <div 
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'url("/user dashboard.png")',
+      }}
+    >
       <Header />
 
       <div className="max-w-[800px] mx-auto px-4 sm:px-6 py-8 lg:py-12">
@@ -134,6 +143,31 @@ export function UserConsultations() {
                     )}
                   </div>
                 </div>
+
+                {/* Meeting link display for accepted consultations */}
+                {c.status === 'accepted' && c.video_room_url && (
+                  <div className="mt-4 p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Video className="w-5 h-5 text-emerald-700" />
+                      <h4 className="text-[14px] font-semibold text-emerald-800">Meeting Link Available</h4>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <div className="flex-1">
+                        <p className="text-[13px] text-emerald-700 font-medium truncate">{c.video_room_url}</p>
+                        <p className="text-[11px] text-emerald-600 mt-1">Click the button to join your consultation session</p>
+                      </div>
+                      <a
+                        href={c.video_room_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        Join Meeting
+                      </a>
+                    </div>
+                  </div>
+                )}
 
                 {c.user_summary && (
                   <div className="mt-4 bg-slate-50 rounded-[8px] px-4 py-3 border border-slate-100">

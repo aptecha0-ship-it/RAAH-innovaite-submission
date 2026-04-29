@@ -139,6 +139,9 @@ export function Header() {
             <Link to="/lawyers" className="text-[15px] text-foreground hover:text-primary transition-colors">
               Verified Lawyers
             </Link>
+            <Link to="/blog" className="text-[15px] text-foreground hover:text-primary transition-colors">
+              Legal Blogs
+            </Link>
             <Link to="/about" className="text-[15px] text-foreground hover:text-primary transition-colors">
               About
             </Link>
@@ -221,6 +224,9 @@ export function Header() {
           </Link>
           <Link to="/lawyers" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2 border-b border-border/50">
             Verified Lawyers
+          </Link>
+          <Link to="/blog" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2 border-b border-border/50">
+            Legal Blogs
           </Link>
           <Link to="/about" onClick={() => setShowMobileMenu(false)} className="text-[15px] font-medium text-foreground hover:text-primary transition-colors py-2">
             About

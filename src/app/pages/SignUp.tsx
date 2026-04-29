@@ -154,7 +154,13 @@ export function SignUp() {
   };
 
   return (
-    <div className="min-h-screen bg-white">
+    <div 
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'url("/login.png")',
+      }}
+    >
       <Header />
 
       <div className="max-w-[1200px] mx-auto px-6 py-12">

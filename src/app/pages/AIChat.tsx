@@ -4,7 +4,7 @@ import { Header } from '../components/Header';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { useAppContext } from '../context/AppContext';
-import { MessageCircle, Send, Shield, Loader2, Trash2, Menu, X, UserCheck } from 'lucide-react';
+import { MessageCircle, Send, Shield, Loader2, Trash2, Menu, X, UserCheck, Phone, AlertTriangle } from 'lucide-react';
 import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 
 // Fetch active AI config from the server (model + api keys + generic prompt)
@@ -50,6 +50,7 @@ export function AIChat() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isRecommending, setIsRecommending] = useState(false);
   const [activeModel, setActiveModel] = useState<string>('gemini');
+  const [showEmergency, setShowEmergency] = useState(false);
 
   // Fetch and cache active model label for display
   useEffect(() => {
@@ -367,8 +368,77 @@ Use this profile to tailor every response. Never ask the user to repeat anything
     navigate('/guidance-summary');
   };
 
+  // ─── Emergency Helplines ────────────────────────────────────────────────────
+  const EMERGENCY_LINES = [
+    { name: 'Women Helpline', number: '1099', desc: 'National helpline for women in distress', color: 'bg-rose-600' },
+    { name: 'Police Emergency', number: '15', desc: 'Immediate police response', color: 'bg-blue-700' },
+    { name: 'Rescue', number: '1122', desc: 'Emergency rescue & ambulance', color: 'bg-orange-600' },
+    { name: 'Women Protection Authority', number: '0800-09999', desc: 'Punjab Women Protection (toll-free)', color: 'bg-purple-700' },
+    { name: 'Edhi Foundation', number: '115', desc: 'Free ambulance & shelter service', color: 'bg-teal-700' },
+  ];
+
+  const EmergencyModal = () => (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4" onClick={() => setShowEmergency(false)}>
+      <div
+        className="bg-white rounded-[20px] shadow-2xl w-full max-w-[480px] overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="bg-rose-600 px-6 py-5 flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <AlertTriangle className="w-5 h-5 text-white" />
+              <h2 className="text-[20px] font-bold text-white">Emergency Helplines</h2>
+            </div>
+            <p className="text-rose-100 text-[13px]">Pakistan women's crisis & safety numbers</p>
+          </div>
+          <button onClick={() => setShowEmergency(false)} className="text-white/70 hover:text-white p-1 mt-0.5">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Helplines */}
+        <div className="p-5 space-y-3">
+          {EMERGENCY_LINES.map(line => (
+            <div key={line.number} className="flex items-center gap-4 bg-slate-50 rounded-[12px] p-4 border border-slate-100">
+              <div className={`${line.color} text-white rounded-full w-10 h-10 flex items-center justify-center shrink-0`}>
+                <Phone className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[14px] font-semibold text-slate-800">{line.name}</p>
+                <p className="text-[12px] text-slate-500">{line.desc}</p>
+              </div>
+              <a
+                href={`tel:${line.number}`}
+                className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-[15px] px-4 py-2 rounded-[8px] transition-colors shrink-0"
+              >
+                {line.number}
+              </a>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer note */}
+        <div className="px-5 pb-5">
+          <div className="bg-amber-50 border border-amber-200 rounded-[10px] p-3 flex items-start gap-2">
+            <Shield className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+            <p className="text-[12px] text-amber-800 leading-relaxed">
+              If you are in immediate danger, call <strong>15 (Police)</strong> or <strong>1122 (Rescue)</strong> right now. Your safety comes first.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="min-h-screen bg-white">
+    <div 
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'url("/user dashboard.png")',
+      }}
+    >
       <Header />
 
       <div className="max-w-[1200px] mx-auto px-4 lg:px-6 py-4 lg:py-8">
@@ -383,7 +453,7 @@ Use this profile to tailor every response. Never ask the user to repeat anything
           )}
 
           {/* Sidebar */}
-          <div className={`fixed inset-y-0 left-0 w-[280px] bg-[#F8FAFC] z-50 transform transition-transform duration-300 ease-in-out lg:relative lg:translate-x-0 lg:w-full lg:h-full lg:rounded-[10px] p-6 flex flex-col shadow-2xl lg:shadow-none ${
+          <div className={`fixed inset-y-0 left-0 w-[280px] bg-[#F8FAFC]/80 backdrop-blur-md z-50 transform transition-transform duration-300 ease-in-out lg:relative lg:translate-x-0 lg:w-full lg:h-full lg:rounded-[10px] p-6 flex flex-col shadow-2xl lg:shadow-none ${
             isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}>
             <div className="flex justify-between items-center mb-6 lg:hidden">
@@ -468,6 +538,15 @@ Use this profile to tailor every response. Never ask the user to repeat anything
               )}
             </div>
 
+            {/* Emergency Button */}
+            <button
+              onClick={() => setShowEmergency(true)}
+              className="w-full mb-3 flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-700 text-white font-semibold rounded-[10px] py-2.5 text-[14px] transition-all shadow-md hover:shadow-lg animate-pulse"
+            >
+              <Phone className="w-4 h-4" />
+              Emergency Helplines
+            </button>
+
             <div className="pt-4 border-t border-border mt-4 space-y-3">
               {chatSessions.length > 0 && (
                 <button 
@@ -495,10 +574,10 @@ Use this profile to tailor every response. Never ask the user to repeat anything
           </div>
 
           {/* Main Chat Area */}
-          <div className="flex-1 flex flex-col bg-white rounded-[10px] border border-border lg:border-none shadow-sm lg:shadow-none relative w-full overflow-hidden">
+          <div className="flex-1 flex flex-col bg-white/80 backdrop-blur-md rounded-[10px] border border-border lg:border-none shadow-sm lg:shadow-none relative w-full overflow-hidden">
             
             {/* Mobile Header Toggle */}
-            <div className="lg:hidden flex items-center px-4 py-3 border-b border-border bg-white sticky top-0 z-10 w-full">
+            <div className="lg:hidden flex items-center px-4 py-3 border-b border-border bg-white/80 backdrop-blur-md sticky top-0 z-10 w-full">
               <button 
                 onClick={() => setIsSidebarOpen(true)}
                 className="mr-3 text-slate-500 hover:text-slate-800 p-1 -ml-1"
@@ -548,7 +627,7 @@ Use this profile to tailor every response. Never ask the user to repeat anything
               )}
             </div>
             {/* Input Area */}
-            <div className="p-4 lg:p-6 border-t border-border bg-white z-10 sticky bottom-0">
+            <div className="p-4 lg:p-6 border-t border-border bg-white/50 backdrop-blur-md z-10 sticky bottom-0">
               <div className="relative flex items-center">
                 <Input
                   type="text"
@@ -576,6 +655,9 @@ Use this profile to tailor every response. Never ask the user to repeat anything
           </div>
         </div>
       </div>
+
+      {/* Emergency Modal */}
+      {showEmergency && <EmergencyModal />}
     </div>
   );
 }

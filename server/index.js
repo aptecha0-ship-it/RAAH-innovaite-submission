@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Pinecone } from '@pinecone-database/pinecone';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -20,6 +21,37 @@ global.alert = (msg) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_for_jwt_signing_raah_123';
+
+// ----------------------------------------------------------------------
+// ENCRYPTION HELPERS
+// ----------------------------------------------------------------------
+const ENCRYPTION_KEY = crypto.scryptSync(process.env.ENCRYPTION_KEY || 'default_fallback_secret_key_raah', 'salt', 32);
+
+function encryptText(text) {
+    if (!text) return text;
+    let iv = crypto.randomBytes(16);
+    let cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    return iv.toString('hex') + ':' + encrypted;
+}
+
+function decryptText(text) {
+    if (!text) return text;
+    try {
+        let textParts = text.split(':');
+        if (textParts.length < 2) return text; // Probably not encrypted
+        let iv = Buffer.from(textParts.shift(), 'hex');
+        let encryptedText = textParts.join(':');
+        let decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+        let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (err) {
+        console.error('Decryption failed:', err);
+        return '[Encrypted Content Unavailable]';
+    }
+}
 
 // Middleware
 app.use(cors());
@@ -444,6 +476,17 @@ const initDb = async () => {
           );
         `);
 
+        // Check if intake_profile column exists in consultations
+        const checkIntakeProfileColumn = await client.query(`
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_name='consultations' AND column_name='intake_profile';
+        `);
+        if (checkIntakeProfileColumn.rows.length === 0) {
+            await client.query(`ALTER TABLE consultations ADD COLUMN intake_profile JSONB;`);
+            console.log('Added intake_profile column to consultations table');
+        }
+
         // Create consultation_messages table for real-time chat
         await client.query(`
           CREATE TABLE IF NOT EXISTS consultation_messages (
@@ -456,6 +499,114 @@ const initDb = async () => {
         `);
 
         console.log('Users table initialized or already exists');
+
+        // Create lawyer-to-lawyer consultation tables
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS platform_settings (
+            id SERIAL PRIMARY KEY,
+            platform_fee_percent DECIMAL(5,2) DEFAULT 15.00,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+        
+        // Seed default platform_settings row if none exists
+        const platformSettingsCheck = await client.query('SELECT id FROM platform_settings LIMIT 1');
+        if (platformSettingsCheck.rows.length === 0) {
+            await client.query('INSERT INTO platform_settings (platform_fee_percent) VALUES (15.00)');
+            console.log('Default platform_settings row created.');
+        }
+
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS lawyer_consultation_profiles (
+            id SERIAL PRIMARY KEY,
+            lawyer_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE UNIQUE NOT NULL,
+            specialization_tags JSONB,
+            title VARCHAR(255),
+            bio_snippet VARCHAR(200),
+            rate_per_hour INTEGER DEFAULT 0,
+            rate_per_session INTEGER,
+            session_duration_minutes INTEGER DEFAULT 60,
+            availability_slots JSONB,
+            is_active BOOLEAN DEFAULT FALSE,
+            is_approved BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS peer_consultation_requests (
+            id SERIAL PRIMARY KEY,
+            requester_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE,
+            consultant_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE,
+            case_summary TEXT,
+            case_type VARCHAR(100),
+            preferred_slot TIMESTAMP WITH TIME ZONE,
+            urgency_level VARCHAR(50) DEFAULT 'normal',
+            status VARCHAR(50) DEFAULT 'pending',
+            payment_status VARCHAR(50) DEFAULT 'unpaid',
+            amount_due INTEGER DEFAULT 0,
+            platform_fee INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS peer_consultation_sessions (
+            id SERIAL PRIMARY KEY,
+            request_id INTEGER REFERENCES peer_consultation_requests(id) ON DELETE CASCADE,
+            scheduled_at TIMESTAMP WITH TIME ZONE,
+            joined_at TIMESTAMP WITH TIME ZONE,
+            ended_at TIMESTAMP WITH TIME ZONE,
+            actual_duration_minutes INTEGER,
+            session_notes TEXT,
+            recording_consent BOOLEAN DEFAULT FALSE,
+            video_room_id VARCHAR(255),
+            video_room_url VARCHAR(500),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Ensure request_id is unique so ON CONFLICT upserts work
+        try {
+            await client.query(`
+              ALTER TABLE peer_consultation_sessions
+              ADD CONSTRAINT peer_consultation_sessions_request_id_unique UNIQUE (request_id);
+            `);
+        } catch (e) {
+            // Constraint might already exist, which is fine
+        }
+
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS peer_consultation_reviews (
+            id SERIAL PRIMARY KEY,
+            session_id INTEGER REFERENCES peer_consultation_sessions(id) ON DELETE CASCADE,
+            reviewer_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE,
+            rating INTEGER CHECK (rating >= 1 AND rating <= 5),
+            comment TEXT,
+            is_visible BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Create blog posts table with admin approval workflow
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS blog_posts (
+            id SERIAL PRIMARY KEY,
+            lawyer_id INTEGER REFERENCES lawyer_profiles(id) ON DELETE CASCADE,
+            title VARCHAR(255),
+            content TEXT NOT NULL,
+            excerpt VARCHAR(500),
+            status VARCHAR(50) DEFAULT 'pending',
+            approved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            approved_at TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
         client.release();
     } catch (err) {
         console.error('Error initializing database:', err);
@@ -1221,7 +1372,7 @@ app.post('/api/consultations', async (req, res) => {
         return res.status(401).json({ error: 'Invalid token' });
     }
 
-    const { lawyerProfileId, userSummary } = req.body;
+    const { lawyerProfileId, userSummary, intakeProfile } = req.body;
     if (!lawyerProfileId) return res.status(400).json({ error: 'lawyerProfileId is required' });
 
     try {
@@ -1235,8 +1386,8 @@ app.post('/api/consultations', async (req, res) => {
         }
 
         const result = await pool.query(
-            `INSERT INTO consultations (user_id, lawyer_profile_id, user_summary) VALUES ($1, $2, $3) RETURNING *`,
-            [userId, lawyerProfileId, userSummary || null]
+            `INSERT INTO consultations (user_id, lawyer_profile_id, user_summary, intake_profile) VALUES ($1, $2, $3, $4) RETURNING *`,
+            [userId, lawyerProfileId, userSummary || null, intakeProfile || null]
         );
         res.status(201).json({ message: 'Consultation request sent.', consultation: result.rows[0] });
     } catch (error) {
@@ -1259,13 +1410,34 @@ app.get('/api/user/consultations', async (req, res) => {
     }
 
     try {
-        const result = await pool.query(`
-            SELECT c.*, lp.full_name as lawyer_name, lp.practice_areas as lawyer_specialty
-            FROM consultations c
-            JOIN lawyer_profiles lp ON c.lawyer_profile_id = lp.id
-            WHERE c.user_id = $1
-            ORDER BY c.created_at DESC
-        `, [userId]);
+        // Check if user is a lawyer and get their lawyer profile for peer consultations
+        const lawyerProfileResult = await pool.query('SELECT id FROM lawyer_profiles WHERE user_id = $1', [userId]);
+        const isLawyer = lawyerProfileResult.rows.length > 0;
+        const lawyerProfileId = isLawyer ? lawyerProfileResult.rows[0].id : null;
+
+        let result;
+        if (isLawyer && lawyerProfileId) {
+            // User is a lawyer, get peer consultation requests they sent
+            result = await pool.query(`
+                SELECT r.id, r.consultant_id, lp.full_name as lawyer_name, lp.practice_areas as lawyer_specialty,
+                       r.case_summary as user_summary, r.status, r.created_at, r.preferred_slot,
+                       s.id as session_id, s.video_room_url
+                FROM peer_consultation_requests r
+                JOIN lawyer_profiles lp ON r.consultant_id = lp.id
+                LEFT JOIN peer_consultation_sessions s ON s.request_id = r.id
+                WHERE r.requester_id = $1
+                ORDER BY r.created_at DESC
+            `, [lawyerProfileId]);
+        } else {
+            // Regular user, get regular consultations
+            result = await pool.query(`
+                SELECT c.*, lp.full_name as lawyer_name, lp.practice_areas as lawyer_specialty
+                FROM consultations c
+                JOIN lawyer_profiles lp ON c.lawyer_profile_id = lp.id
+                WHERE c.user_id = $1
+                ORDER BY c.created_at DESC
+            `, [userId]);
+        }
 
         res.json(result.rows);
     } catch (error) {
@@ -1304,6 +1476,58 @@ app.get('/api/lawyer/consultations', async (req, res) => {
         res.json(result.rows);
     } catch (error) {
         console.error('Fetch consultations error:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/lawyer/dashboard-stats
+app.get('/api/lawyer/dashboard-stats', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
+    const token = authHeader.split(' ')[1];
+    let userId;
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        userId = decoded.userId;
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    try {
+        // Get lawyer_profile
+        const lawyerResult = await pool.query('SELECT id, status FROM lawyer_profiles WHERE user_id = $1', [userId]);
+        if (lawyerResult.rows.length === 0) {
+            return res.status(403).json({ error: 'No lawyer profile found.' });
+        }
+        const lawyerProfile = lawyerResult.rows[0];
+
+        // Leads this week (from regular user consultations)
+        const leadsResult = await pool.query(`
+            SELECT COUNT(*) FROM consultations 
+            WHERE lawyer_profile_id = $1 
+            AND created_at >= NOW() - INTERVAL '7 days'
+        `, [lawyerProfile.id]);
+        const leadsThisWeek = parseInt(leadsResult.rows[0].count, 10) || 0;
+
+        // Rating (from peer consultation reviews)
+        const ratingResult = await pool.query(`
+            SELECT AVG(r.rating) as avg_rating 
+            FROM peer_consultation_reviews r
+            JOIN peer_consultation_sessions s ON r.session_id = s.id
+            JOIN peer_consultation_requests req ON s.request_id = req.id
+            WHERE req.consultant_id = $1
+        `, [lawyerProfile.id]);
+        let rating = ratingResult.rows[0].avg_rating ? parseFloat(ratingResult.rows[0].avg_rating).toFixed(1) : 'N/A';
+
+        let subscriptionStatus = lawyerProfile.status === 'approved' ? 'Professional Plan' : 'Pending Verification';
+
+        res.json({
+            subscriptionStatus,
+            leadsThisWeek,
+            rating
+        });
+    } catch (error) {
+        console.error('Fetch dashboard stats error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -1539,6 +1763,689 @@ app.delete('/api/admin/questions/:id', authenticateAdmin, async (req, res) => {
     }
 });
 
+// ----------------------------------------------------------------------
+// LAWYER-TO-LAWYER PEER CONSULTATION (MVP)
+// ----------------------------------------------------------------------
+
+// Middleware to ensure user is a lawyer
+const authenticateLawyer = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'No token provided' });
+        }
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        const result = await pool.query(
+            'SELECT u.role, lp.id as lawyer_profile_id, lp.years_of_experience FROM users u LEFT JOIN lawyer_profiles lp ON u.id = lp.user_id WHERE u.id = $1', 
+            [decoded.userId]
+        );
+        
+        if (result.rows.length === 0 || result.rows[0].role !== 'lawyer') {
+            return res.status(403).json({ error: 'Forbidden. Lawyer access required.' });
+        }
+        
+        req.user = { 
+            userId: decoded.userId, 
+            lawyerProfileId: result.rows[0].lawyer_profile_id,
+            yearsOfExperience: parseInt(result.rows[0].years_of_experience) || 0
+        };
+        next();
+    } catch (error) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+};
+
+// 0. Get My Consultation Profile
+app.get('/api/consultations/me', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    try {
+        const result = await pool.query('SELECT * FROM lawyer_consultation_profiles WHERE lawyer_id = $1', [lawyerProfileId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error fetching my consultation profile:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 1. Consultant Application (Opt-in to offer consultations)
+app.post('/api/consultations/apply', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId, yearsOfExperience } = req.user;
+    const { specialization_tags, title, bio_snippet, rate_per_hour, rate_per_session, session_duration_minutes, availability_slots } = req.body;
+
+    if (!lawyerProfileId) return res.status(400).json({ error: 'Complete lawyer onboarding first.' });
+    
+    // Must have 5+ years of experience to offer peer consultations
+    if (yearsOfExperience < 5) {
+        return res.status(403).json({ error: 'Must have at least 5 years of experience to offer peer consultations.' });
+    }
+
+    try {
+        const result = await pool.query(`
+            INSERT INTO lawyer_consultation_profiles 
+            (lawyer_id, specialization_tags, title, bio_snippet, rate_per_hour, rate_per_session, session_duration_minutes, availability_slots, is_active, is_approved)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, false)
+            ON CONFLICT (lawyer_id) DO UPDATE SET
+            specialization_tags = EXCLUDED.specialization_tags,
+            title = EXCLUDED.title,
+            bio_snippet = EXCLUDED.bio_snippet,
+            rate_per_hour = EXCLUDED.rate_per_hour,
+            rate_per_session = EXCLUDED.rate_per_session,
+            session_duration_minutes = EXCLUDED.session_duration_minutes,
+            availability_slots = EXCLUDED.availability_slots,
+            updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        `, [
+            lawyerProfileId, 
+            JSON.stringify(specialization_tags || []), 
+            title, 
+            bio_snippet, 
+            rate_per_hour || 0, 
+            rate_per_session || null, 
+            session_duration_minutes || 60, 
+            JSON.stringify(availability_slots || {})
+        ]);
+
+        res.status(200).json({ message: 'Consultant profile updated. Pending admin approval.', profile: result.rows[0] });
+    } catch (error) {
+        console.error('Error applying for consultation:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 2. Get active consultant listings (Marketplace)
+app.get('/api/consultations/listings', authenticateLawyer, async (req, res) => {
+    try {
+        const { lawyerProfileId } = req.user;
+        const result = await pool.query(`
+            SELECT c.*, lp.full_name, lp.city, lp.practice_areas, lp.years_of_experience
+            FROM lawyer_consultation_profiles c
+            JOIN lawyer_profiles lp ON c.lawyer_id = lp.id
+            WHERE c.is_active = true AND c.is_approved = true AND c.lawyer_id != $1
+        `, [lawyerProfileId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching listings:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 3. Submit a consultation request (Booking)
+app.post('/api/consultations/requests', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { consultant_id, case_summary, case_type, preferred_slot, urgency_level } = req.body;
+
+    if (lawyerProfileId === parseInt(consultant_id)) {
+        return res.status(400).json({ error: 'You cannot consult yourself.' });
+    }
+
+    try {
+        // Fetch consultant rate & platform fee
+        const consultantResult = await pool.query('SELECT rate_per_session, rate_per_hour FROM lawyer_consultation_profiles WHERE lawyer_id = $1', [consultant_id]);
+        if (consultantResult.rows.length === 0) return res.status(404).json({ error: 'Consultant not found' });
+        
+        const rate = consultantResult.rows[0].rate_per_session || consultantResult.rows[0].rate_per_hour || 0;
+        
+        const settingsResult = await pool.query('SELECT platform_fee_percent FROM platform_settings LIMIT 1');
+        const feePercent = settingsResult.rows.length > 0 ? parseFloat(settingsResult.rows[0].platform_fee_percent) : 15.0;
+        
+        const platformFee = Math.round(rate * (feePercent / 100));
+        const amountDue = rate + platformFee;
+
+        // Encrypt case summary
+        const encryptedSummary = encryptText(case_summary);
+
+        const result = await pool.query(`
+            INSERT INTO peer_consultation_requests 
+            (requester_id, consultant_id, case_summary, case_type, preferred_slot, urgency_level, amount_due, platform_fee, status, payment_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'unpaid')
+            RETURNING id, requester_id, consultant_id, case_type, preferred_slot, urgency_level, amount_due, platform_fee, status, payment_status, created_at
+        `, [lawyerProfileId, consultant_id, encryptedSummary, case_type, preferred_slot, urgency_level || 'normal', amountDue, platformFee]);
+
+        res.status(201).json({ message: 'Request submitted. Pending payment and acceptance.', request: result.rows[0] });
+    } catch (error) {
+        console.error('Error submitting request:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 4. Get User's Sent and Received Requests
+app.get('/api/consultations/requests', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    try {
+        const sent = await pool.query(`
+            SELECT r.id, r.consultant_id, lp.full_name as consultant_name, r.case_type, r.preferred_slot, r.urgency_level, r.status, r.payment_status, r.amount_due, r.created_at,
+                   s.id as session_id, s.video_room_url
+            FROM peer_consultation_requests r
+            JOIN lawyer_profiles lp ON r.consultant_id = lp.id
+            LEFT JOIN peer_consultation_sessions s ON s.request_id = r.id
+            WHERE r.requester_id = $1
+            ORDER BY r.created_at DESC
+        `, [lawyerProfileId]);
+
+        const received = await pool.query(`
+            SELECT r.id, r.requester_id, lp.full_name as requester_name, r.case_type, r.preferred_slot, r.urgency_level, r.status, r.payment_status, r.amount_due, r.created_at, r.case_summary,
+                   s.id as session_id, s.video_room_url
+            FROM peer_consultation_requests r
+            JOIN lawyer_profiles lp ON r.requester_id = lp.id
+            LEFT JOIN peer_consultation_sessions s ON s.request_id = r.id
+            WHERE r.consultant_id = $1
+            ORDER BY r.created_at DESC
+        `, [lawyerProfileId]);
+
+        // Decrypt summaries for received requests
+        const decryptedReceived = received.rows.map(req => {
+            req.case_summary = decryptText(req.case_summary);
+            return req;
+        });
+
+        res.status(200).json({ sent: sent.rows, received: decryptedReceived });
+    } catch (error) {
+        console.error('Error fetching requests:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Set Meeting Link — accepts request_id, auto-creates session if needed
+app.patch('/api/consultations/requests/:id/meeting-link', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params; // this is the REQUEST id
+    const { meeting_url } = req.body;
+
+    if (!meeting_url || !/^https?:\/\//i.test(meeting_url)) {
+        return res.status(400).json({ error: 'A valid https:// meeting URL is required.' });
+    }
+
+    try {
+        // Verify this lawyer is the consultant for this request
+        const check = await pool.query(
+            'SELECT id, consultant_id, preferred_slot FROM peer_consultation_requests WHERE id = $1',
+            [id]
+        );
+        if (check.rows.length === 0) return res.status(404).json({ error: 'Request not found.' });
+        if (check.rows[0].consultant_id !== lawyerProfileId) {
+            return res.status(403).json({ error: 'Only the consultant can set the meeting link.' });
+        }
+
+        // Check if session already exists
+        const existingSession = await pool.query(
+            'SELECT id FROM peer_consultation_sessions WHERE request_id = $1',
+            [id]
+        );
+
+        if (existingSession.rows.length > 0) {
+            // Update existing session
+            await pool.query(`
+                UPDATE peer_consultation_sessions 
+                SET video_room_url = $1, joined_at = CURRENT_TIMESTAMP
+                WHERE request_id = $2
+            `, [meeting_url, id]);
+        } else {
+            // Create new session
+            await pool.query(`
+                INSERT INTO peer_consultation_sessions (request_id, scheduled_at, video_room_url)
+                VALUES ($1, COALESCE($2, NOW()), $3)
+            `, [id, check.rows[0].preferred_slot, meeting_url]);
+        }
+
+        res.status(200).json({ message: 'Meeting link saved and shared with requester.', url: meeting_url });
+    } catch (error) {
+        console.error('Error saving meeting link:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Also return session info for received requests
+app.get('/api/consultations/requests/received-with-sessions', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    try {
+        const result = await pool.query(`
+            SELECT r.id, r.consultant_id, lp.full_name as consultant_name, r.status, r.created_at,
+                   s.id as session_id, s.video_room_url
+            FROM peer_consultation_requests r
+            JOIN lawyer_profiles lp ON r.consultant_id = lp.id
+            LEFT JOIN peer_consultation_sessions s ON s.request_id = r.id
+            WHERE r.requester_id = $1
+            ORDER BY r.created_at DESC
+        `, [lawyerProfileId]);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Also expose session video_room_url for received (consultant) requests
+app.get('/api/consultations/sessions/by-request/:requestId', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { requestId } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT s.id, s.video_room_url FROM peer_consultation_sessions s
+            JOIN peer_consultation_requests r ON s.request_id = r.id
+            WHERE s.request_id = $1 AND (r.requester_id = $2 OR r.consultant_id = $2)
+        `, [requestId, lawyerProfileId]);
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Session not found' });
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 6. Requester view: their sent requests
+app.patch('/api/consultations/requests/:id', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params;
+    const { status } = req.body; // 'accepted' or 'declined'
+
+    if (!['accepted', 'declined'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status update' });
+    }
+
+    try {
+        const check = await pool.query('SELECT consultant_id, status, preferred_slot FROM peer_consultation_requests WHERE id = $1', [id]);
+        if (check.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+        if (check.rows[0].consultant_id !== lawyerProfileId) return res.status(403).json({ error: 'Unauthorized' });
+
+        const result = await pool.query('UPDATE peer_consultation_requests SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *', [status, id]);
+        
+        // If accepted, generate a session record
+        if (status === 'accepted') {
+            await pool.query(`
+                INSERT INTO peer_consultation_sessions (request_id, scheduled_at) 
+                VALUES ($1, $2)
+            `, [id, check.rows[0].preferred_slot]);
+        }
+
+        res.status(200).json({ message: `Request ${status}`, request: result.rows[0] });
+    } catch (error) {
+        console.error('Error updating request:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// 6. Manual Payment Marking (MVP Simulation)
+app.patch('/api/consultations/requests/:id/pay', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params;
+
+    try {
+        const check = await pool.query('SELECT requester_id FROM peer_consultation_requests WHERE id = $1', [id]);
+        if (check.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
+        if (check.rows[0].requester_id !== lawyerProfileId) return res.status(403).json({ error: 'Unauthorized' });
+
+        const result = await pool.query('UPDATE peer_consultation_requests SET payment_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *', ['held', id]);
+        
+        res.status(200).json({ message: 'Payment simulated as Held', request: result.rows[0] });
+    } catch (error) {
+        console.error('Error simulating payment:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ----------------------------------------------------------------------
+// SESSION MANAGEMENT & VIDEO
+// ----------------------------------------------------------------------
+
+// Get Session Details
+app.get('/api/consultations/sessions/:id', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params;
+
+    try {
+        const result = await pool.query(`
+            SELECT s.*, r.requester_id, r.consultant_id 
+            FROM peer_consultation_sessions s
+            JOIN peer_consultation_requests r ON s.request_id = r.id
+            WHERE s.id = $1
+        `, [id]);
+
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Session not found' });
+        
+        const session = result.rows[0];
+        if (session.requester_id !== lawyerProfileId && session.consultant_id !== lawyerProfileId) {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        // Decrypt session notes if they exist
+        if (session.session_notes) {
+            session.session_notes = decryptText(session.session_notes);
+        }
+
+        res.status(200).json(session);
+    } catch (error) {
+        console.error('Error fetching session:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Join Session - returns the meeting link set by consultant
+app.post('/api/consultations/sessions/:id/join', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params;
+
+    try {
+        const sessionCheck = await pool.query(`
+            SELECT s.id, s.video_room_url, r.requester_id, r.consultant_id 
+            FROM peer_consultation_sessions s
+            JOIN peer_consultation_requests r ON s.request_id = r.id
+            WHERE s.id = $1
+        `, [id]);
+
+        if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found' });
+        
+        const session = sessionCheck.rows[0];
+        if (session.requester_id !== lawyerProfileId && session.consultant_id !== lawyerProfileId) {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        // Return the meeting link set by the consultant (manual input only)
+        const roomUrl = session.video_room_url;
+
+        if (!roomUrl) {
+            return res.status(400).json({ error: 'No meeting link has been set yet. Please wait for the consultant to add a meeting link.' });
+        }
+
+        res.status(200).json({ url: roomUrl });
+    } catch (error) {
+        console.error('Error joining session:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// End Session & Save Notes
+app.post('/api/consultations/sessions/:id/end', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { id } = req.params;
+    const { session_notes } = req.body;
+
+    try {
+        const sessionCheck = await pool.query(`
+            SELECT s.id, r.requester_id, r.consultant_id 
+            FROM peer_consultation_sessions s
+            JOIN peer_consultation_requests r ON s.request_id = r.id
+            WHERE s.id = $1
+        `, [id]);
+
+        if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found' });
+        
+        const session = sessionCheck.rows[0];
+        if (session.requester_id !== lawyerProfileId && session.consultant_id !== lawyerProfileId) {
+            return res.status(403).json({ error: 'Unauthorized' });
+        }
+
+        let encryptedNotes = null;
+        if (session_notes) {
+            encryptedNotes = encryptText(session_notes);
+        }
+
+        const result = await pool.query(`
+            UPDATE peer_consultation_sessions 
+            SET ended_at = CURRENT_TIMESTAMP, session_notes = COALESCE($1, session_notes), updated_at = CURRENT_TIMESTAMP 
+            WHERE id = $2 RETURNING *
+        `, [encryptedNotes, id]);
+
+        // Also release payment since session is ended (MVP logic: set payment_status to 'released')
+        await pool.query(`UPDATE peer_consultation_requests SET payment_status = 'released' WHERE id = $1`, [session.id]);
+
+        res.status(200).json({ message: 'Session ended successfully', session: result.rows[0] });
+    } catch (error) {
+        console.error('Error ending session:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ----------------------------------------------------------------------
+// REVIEWS & DISPUTES
+// ----------------------------------------------------------------------
+
+// Submit Review
+app.post('/api/consultations/reviews', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { session_id, rating, comment } = req.body;
+
+    try {
+        const sessionCheck = await pool.query(`
+            SELECT r.requester_id 
+            FROM peer_consultation_sessions s
+            JOIN peer_consultation_requests r ON s.request_id = r.id
+            WHERE s.id = $1
+        `, [session_id]);
+
+        if (sessionCheck.rows.length === 0) return res.status(404).json({ error: 'Session not found' });
+        if (sessionCheck.rows[0].requester_id !== lawyerProfileId) return res.status(403).json({ error: 'Only the requester can review the session' });
+
+        const result = await pool.query(`
+            INSERT INTO peer_consultation_reviews (session_id, reviewer_id, rating, comment)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+        `, [session_id, lawyerProfileId, rating, comment]);
+
+        res.status(201).json({ message: 'Review submitted', review: result.rows[0] });
+    } catch (error) {
+        console.error('Error submitting review:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Get Reviews for a Consultant
+app.get('/api/consultations/reviews/:lawyerId', async (req, res) => {
+    const { lawyerId } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT rev.id, rev.rating, rev.comment, rev.created_at, lp.full_name as reviewer_name
+            FROM peer_consultation_reviews rev
+            JOIN peer_consultation_sessions s ON rev.session_id = s.id
+            JOIN peer_consultation_requests req ON s.request_id = req.id
+            JOIN lawyer_profiles lp ON rev.reviewer_id = lp.id
+            WHERE req.consultant_id = $1 AND rev.is_visible = true
+            ORDER BY rev.created_at DESC
+        `, [lawyerId]);
+
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching reviews:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ----------------------------------------------------------------------
+// ADMIN - CONSULTATION APPROVALS
+// ----------------------------------------------------------------------
+
+// Get all consultation applications
+app.get('/api/admin/consultations/applications', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT c.*, lp.full_name, lp.city, lp.years_of_experience, lp.practice_areas, lp.bar_council_name, lp.bar_council_number
+            FROM lawyer_consultation_profiles c
+            JOIN lawyer_profiles lp ON c.lawyer_id = lp.id
+            ORDER BY c.created_at DESC
+        `);
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Error fetching applications:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Update application status
+app.patch('/api/admin/consultations/applications/:id', authenticateAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { is_approved } = req.body;
+    try {
+        const result = await pool.query(`
+            UPDATE lawyer_consultation_profiles 
+            SET is_approved = $1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $2 RETURNING *
+        `, [is_approved, id]);
+        
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+        res.status(200).json(result.rows[0]);
+    } catch (error) {
+        console.error('Error updating application:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Blog API endpoints
+// POST /api/blog/posts - Create new blog post (lawyers only)
+app.post('/api/blog/posts', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    const { title, content, excerpt } = req.body;
+
+    if (!title || !content) {
+        return res.status(400).json({ error: 'Title and content are required' });
+    }
+
+    try {
+        const result = await pool.query(`
+            INSERT INTO blog_posts (lawyer_id, title, content, excerpt, status)
+            VALUES ($1, $2, $3, $4, 'pending')
+            RETURNING *
+        `, [lawyerProfileId, title, content, excerpt || null]);
+
+        res.status(201).json({ 
+            message: 'Blog post submitted for admin approval',
+            post: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error creating blog post:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/blog/posts - Get all approved blog posts (public access)
+app.get('/api/blog/posts', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT bp.*, lp.full_name as author_name, lp.bar_council_name as author_council
+            FROM blog_posts bp
+            JOIN lawyer_profiles lp ON bp.lawyer_id = lp.id
+            WHERE bp.status = 'approved'
+            ORDER BY bp.approved_at DESC
+        `);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching blog posts:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/blog/my-posts - Get lawyer's own blog posts
+app.get('/api/blog/my-posts', authenticateLawyer, async (req, res) => {
+    const { lawyerProfileId } = req.user;
+    
+    try {
+        const result = await pool.query(`
+            SELECT bp.id, bp.title, bp.content, bp.excerpt, bp.status, bp.created_at, bp.updated_at, bp.approved_at
+            FROM blog_posts bp
+            WHERE bp.lawyer_id = $1
+            ORDER BY bp.created_at DESC
+        `, [lawyerProfileId]);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching lawyer blog posts:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/blog/posts/:id - Get single blog post
+app.get('/api/blog/posts/:id', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        const result = await pool.query(`
+            SELECT bp.*, lp.full_name as author_name, lp.bar_council_name as author_council
+            FROM blog_posts bp
+            JOIN lawyer_profiles lp ON bp.lawyer_id = lp.id
+            WHERE bp.id = $1 AND bp.status = 'approved'
+        `, [id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Blog post not found' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error('Error fetching blog post:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// PATCH /api/admin/blog/posts/:id/approve - Approve blog post (admin only)
+app.patch('/api/admin/blog/posts/:id/approve', authenticateAdmin, async (req, res) => {
+    const { id } = req.params;
+    const adminId = req.user.userId;
+
+    try {
+        const result = await pool.query(`
+            UPDATE blog_posts 
+            SET status = 'approved', approved_by = $1, approved_at = CURRENT_TIMESTAMP
+            WHERE id = $2 RETURNING *
+        `, [adminId, id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Blog post not found' });
+        }
+
+        res.status(200).json({ 
+            message: 'Blog post approved successfully',
+            post: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error approving blog post:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+// PATCH /api/admin/blog/posts/:id/reject - Reject blog post (admin only)
+app.patch('/api/admin/blog/posts/:id/reject', authenticateAdmin, async (req, res) => {
+    const { id } = req.params;
+    const adminId = req.user.userId;
+
+    try {
+        const result = await pool.query(`
+            UPDATE blog_posts 
+            SET status = 'rejected', approved_by = $1, approved_at = CURRENT_TIMESTAMP
+            WHERE id = $2 RETURNING *
+        `, [adminId, id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Blog post not found' });
+        }
+
+        res.status(200).json({ 
+            message: 'Blog post rejected successfully',
+            post: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Error rejecting blog post:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// GET /api/admin/blog/posts - Get pending blog posts (admin only)
+app.get('/api/admin/blog/posts', authenticateAdmin, async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT bp.*, lp.full_name as author_name, lp.bar_council_name as author_council
+            FROM blog_posts bp
+            JOIN lawyer_profiles lp ON bp.lawyer_id = lp.id
+            WHERE bp.status = 'pending'
+            ORDER BY bp.created_at DESC
+        `);
+
+        res.json(result.rows);
+    } catch (error) {
+        console.error('Error fetching pending blog posts:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 
 // Serve the built React frontend
 const __filename = fileURLToPath(import.meta.url);

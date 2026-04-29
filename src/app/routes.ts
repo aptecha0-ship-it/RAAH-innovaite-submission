@@ -18,8 +18,15 @@ import { AdminAiSystem } from './pages/AdminAiSystem';
 import { AdminLawyers } from './pages/AdminLawyers';
 import { AdminPayments } from './pages/AdminPayments';
 import { AdminAnalytics } from './pages/AdminAnalytics';
+import { AdminConsultations } from './pages/AdminConsultations';
 import { MatchedLawyers } from './pages/MatchedLawyers';
 import { UserConsultations } from './pages/UserConsultations';
+import { PeerConsultationMarketplace } from './pages/PeerConsultationMarketplace';
+import { PeerConsultantDashboard } from './pages/PeerConsultantDashboard';
+import { PeerConsultationSession } from './pages/PeerConsultationSession';
+import { Blog } from './pages/Blog';
+import { LawyerBlog } from './pages/LawyerBlog';
+import { AdminBlogs } from './pages/AdminBlogs';
 
 export const router = createBrowserRouter([
   {
@@ -95,6 +102,10 @@ export const router = createBrowserRouter([
     Component: AdminAnalytics,
   },
   {
+    path: '/admin/consultations',
+    Component: AdminConsultations,
+  },
+  {
     path: '/why-join-raah',
     Component: WhyJoinRaah,
   },
@@ -105,5 +116,29 @@ export const router = createBrowserRouter([
   {
     path: '/my-consultations',
     Component: UserConsultations,
+  },
+  {
+    path: '/lawyer/consultants',
+    Component: PeerConsultationMarketplace,
+  },
+  {
+    path: '/lawyer/consultant-dashboard',
+    Component: PeerConsultantDashboard,
+  },
+  {
+    path: '/lawyer/consult-session/:id',
+    Component: PeerConsultationSession,
+  },
+  {
+    path: '/blog',
+    Component: Blog,
+  },
+  {
+    path: '/lawyer-blog',
+    Component: LawyerBlog,
+  },
+  {
+    path: '/admin/blogs',
+    Component: AdminBlogs,
   },
 ]);

@@ -5,7 +5,13 @@ import { Lock, CheckCircle, Shield, Users } from 'lucide-react';
 
 export function Landing() {
   return (
-    <div className="min-h-screen bg-white">
+    <div 
+      className="min-h-screen bg-center bg-no-repeat"
+      style={{
+        backgroundSize: '100% 100%',
+        backgroundImage: 'linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), url("/home-bg.png?v=5")',
+      }}
+    >
       <Header />
       
       {/* Hero Section */}

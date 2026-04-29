@@ -6,7 +6,8 @@ import {
   Bot, 
   Scale, 
   CreditCard, 
-  BarChart3 
+  BarChart3,
+  Briefcase
 } from 'lucide-react';
 
 const sidebarLinks = [
@@ -15,6 +16,8 @@ const sidebarLinks = [
   { name: 'Interviews', path: '/admin/interviews', icon: FileText },
   { name: 'AI System', path: '/admin/ai-system', icon: Bot },
   { name: 'Lawyers', path: '/admin/lawyers', icon: Scale },
+  { name: 'Consultants', path: '/admin/consultations', icon: Briefcase },
+  { name: 'Blog Approvals', path: '/admin/blogs', icon: FileText },
   { name: 'Payments', path: '/admin/payments', icon: CreditCard },
   { name: 'Analytics', path: '/admin/analytics', icon: BarChart3 },
 ];
